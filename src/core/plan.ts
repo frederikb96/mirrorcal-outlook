@@ -16,6 +16,8 @@ export interface ForeignObject {
   href: string;
   uid?: string;
   summary?: string;
+  /** Owner id of another mirror, when the object carries a marker with a different value. */
+  owner?: string;
 }
 
 export interface CreateOp {
@@ -80,6 +82,7 @@ export async function classifyRemote(
       const entry: ForeignObject = { href: object.href };
       if (info.uid) entry.uid = info.uid;
       if (info.summary) entry.summary = info.summary;
+      if (info.owner && info.owner !== ownerId) entry.owner = info.owner;
       foreign.push(entry);
     }
   }
@@ -160,6 +163,11 @@ export async function planSync(
       start: o.start,
     }));
   return plan;
+}
+
+/** Distinct owner ids of other mirrors' objects, in order of appearance. */
+export function otherOwnersOf(foreign: ForeignObject[]): string[] {
+  return [...new Set(foreign.flatMap((f) => (f.owner ? [f.owner] : [])))];
 }
 
 /** Fingerprint of what a plan would do; a confirmation is only valid for the plan it was given for. */

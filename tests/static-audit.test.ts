@@ -31,7 +31,7 @@ describe('what the code can send', () => {
     expect(methodsIn(outlook?.text ?? '')).toEqual(['GET']);
   });
 
-  test('the CalDAV client only lists, reads the change tag, writes and deletes', () => {
+  test('the CalDAV client only lists, inspects, reads the change tag, writes and deletes', () => {
     const caldav = files.find((f) => f.name === 'core/caldav.ts');
     expect([...new Set(methodsIn(caldav?.text ?? ''))].sort()).toEqual([
       'DELETE',
@@ -39,6 +39,36 @@ describe('what the code can send', () => {
       'PUT',
       'REPORT',
     ]);
+  });
+
+  test('every request method is a literal, so none can be chosen at run time', () => {
+    for (const f of files) {
+      const code = f.text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      const all = [...code.matchAll(/\bmethod\s*:/g)].length;
+      const literal = [...code.matchAll(/\bmethod:\s*'[A-Z]+'/g)].length;
+      expect({ file: f.name, dynamic: all - literal }).toEqual({ file: f.name, dynamic: 0 });
+    }
+  });
+
+  test('every PROPFIND asks for the collection itself, never its contents', () => {
+    const caldav = files.find((f) => f.name === 'core/caldav.ts')?.text ?? '';
+    const requests = [...caldav.matchAll(/method: 'PROPFIND',\s*headers: \{ Depth: '(\d)'/g)];
+    expect(requests.length).toBe([...caldav.matchAll(/method: 'PROPFIND'/g)].length);
+    expect(requests.every((m) => m[1] === '0')).toBe(true);
+  });
+
+  test('the extension shell reaches the calendar server only through the engine', () => {
+    for (const f of files.filter((file) => file.name.startsWith('extension/'))) {
+      expect({ file: f.name, direct: /core\/caldav\.ts/.test(f.text) }).toEqual({
+        file: f.name,
+        direct: false,
+      });
+    }
+  });
+
+  test('every flight against the destination runs under the worker keep-alive', () => {
+    const runner = files.find((f) => f.name === 'extension/runner.ts')?.text ?? '';
+    expect([...runner.matchAll(/keepAliveWhile\(/g)].length).toBe(2);
   });
 
   test('no other module performs requests', () => {

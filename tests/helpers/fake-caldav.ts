@@ -5,6 +5,7 @@ export interface DavRequest {
   method: string;
   url: string;
   headers: Record<string, string>;
+  body?: string;
 }
 
 interface Stored {
@@ -29,7 +30,13 @@ export class FakeCalDav {
   readonly objects = new Map<string, Stored>();
   readonly requests: DavRequest[] = [];
   readonly username = 'alice';
-  readonly password = 'test-app-password';
+  /** The password the server accepts; change it to simulate a rotated app password. */
+  password = 'test-app-password';
+  /** What the collection URL is, for the inspection request. */
+  collection: { kind: 'calendar' | 'home' | 'tasks'; name?: string } = {
+    kind: 'calendar',
+    name: 'Work',
+  };
   private counter = 0;
   private ctag = 0;
   /** Fail the next request(s) matching this predicate with the given status. */
@@ -80,11 +87,34 @@ export class FakeCalDav {
     for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
       headers[k.toLowerCase()] = v;
     }
-    this.requests.push({ method, url: input, headers });
+    this.requests.push({
+      method,
+      url: input,
+      headers,
+      ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+    });
     const expected = `Basic ${btoa(`${this.username}:${this.password}`)}`;
     if (headers.authorization !== expected) return new Response('', { status: 401 });
     const forced = this.failWhen?.(method, input);
     if (forced !== undefined) return new Response('', { status: forced });
+
+    if (method === 'PROPFIND' && String(init?.body).includes('resourcetype')) {
+      const { kind, name } = this.collection;
+      const type = kind === 'home' ? '<d:collection/>' : '<d:collection/><cal:calendar/>';
+      const components =
+        kind === 'calendar'
+          ? '<cal:comp name="VEVENT"/>'
+          : kind === 'tasks'
+            ? '<cal:comp name="VTODO"/>'
+            : '';
+      const set =
+        kind === 'home'
+          ? ''
+          : `<cal:supported-calendar-component-set>${components}</cal:supported-calendar-component-set>`;
+      const xml = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:response><d:href>${this.root}</d:href><d:propstat><d:prop><d:resourcetype>${type}</d:resourcetype>${name ? `<d:displayname>${name}</d:displayname>` : ''}${set}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`;
+      return new Response(xml, { status: 207 });
+    }
 
     if (method === 'PROPFIND') {
       const xml = `<?xml version="1.0"?>

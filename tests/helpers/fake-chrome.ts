@@ -17,15 +17,42 @@ function storageArea(data: Area) {
   };
 }
 
-/** Just enough of the chrome.* surface for the runner: two storage areas and host permissions. */
+/** Just enough of the chrome.* surface for the runner: storage, host permissions, the badge. */
 export function installFakeChrome() {
   const local: Area = new Map();
   const session: Area = new Map();
-  const state = { permissionGranted: true };
+  const state = {
+    permissionGranted: true,
+    badge: '',
+    title: '',
+    platformCalls: 0,
+    removedOrigins: [] as string[],
+  };
   (globalThis as Record<string, unknown>).chrome = {
     storage: { local: storageArea(local), session: storageArea(session) },
-    permissions: { contains: async () => state.permissionGranted },
-    runtime: { id: 'test-extension-id' },
+    permissions: {
+      contains: async () => state.permissionGranted,
+      remove: async (request: { origins: string[] }) => {
+        state.removedOrigins.push(...request.origins);
+        return true;
+      },
+    },
+    runtime: {
+      id: 'test-extension-id',
+      getPlatformInfo: async () => {
+        state.platformCalls += 1;
+        return {};
+      },
+    },
+    action: {
+      setBadgeText: async ({ text }: { text: string }) => {
+        state.badge = text;
+      },
+      setBadgeBackgroundColor: async () => {},
+      setTitle: async ({ title }: { title: string }) => {
+        state.title = title;
+      },
+    },
   };
   return { local, session, state };
 }

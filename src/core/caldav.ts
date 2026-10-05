@@ -166,26 +166,68 @@ const CTAG_BODY = `<?xml version="1.0" encoding="utf-8"?>
 
 /**
  * The collection's change tag: one small request that moves whenever anything in the calendar
- * changes. Undefined when the server does not offer it or the request fails; callers then read
- * the whole calendar.
+ * changes. Undefined when the server does not offer it or the request fails, so callers read the
+ * whole calendar; rejected credentials are the one failure that is reported, so a run does not
+ * go on to repeat the request.
  */
 export async function getCtag(
   fetchImpl: FetchLike,
   target: CalDavTarget,
 ): Promise<string | undefined> {
+  const collection = resolveInCollection(target, normalizeCaldavUrl(target.url));
+  let response: Response;
   try {
-    const collection = resolveInCollection(target, normalizeCaldavUrl(target.url));
-    const response = await send(fetchImpl, target, collection, {
+    response = await send(fetchImpl, target, collection, {
       method: 'PROPFIND',
       headers: { Depth: '0', 'Content-Type': 'application/xml; charset=utf-8' },
       body: CTAG_BODY,
     });
-    if (response.status !== 207) return undefined;
+  } catch {
+    return undefined;
+  }
+  if (response.status === 401) throw failure(response, 'Reading the change tag');
+  if (response.status !== 207) return undefined;
+  try {
     const ctag = elementText(await response.text(), 'getctag')?.trim();
     return ctag || undefined;
   } catch {
     return undefined;
   }
+}
+
+const INSPECT_BODY = `<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:resourcetype/><d:displayname/><c:supported-calendar-component-set/></d:prop></d:propfind>`;
+
+export interface CollectionInfo {
+  /** The URL is a calendar collection, not a calendar home or some other resource. */
+  isCalendar: boolean;
+  /** The server's display name for it. */
+  name?: string;
+  /** False when the server lists the components it holds and events are not among them. */
+  holdsEvents: boolean;
+}
+
+/** What the configured URL is: one Depth-0 PROPFIND on the collection, nothing is written. */
+export async function inspectCollection(
+  fetchImpl: FetchLike,
+  target: CalDavTarget,
+): Promise<CollectionInfo> {
+  const collection = resolveInCollection(target, normalizeCaldavUrl(target.url));
+  const response = await send(fetchImpl, target, collection, {
+    method: 'PROPFIND',
+    headers: { Depth: '0', 'Content-Type': 'application/xml; charset=utf-8' },
+    body: INSPECT_BODY,
+  });
+  if (response.status !== 207) throw failure(response, 'Checking the calendar');
+  const xml = await response.text();
+  const resourceType = elementText(xml, 'resourcetype') ?? '';
+  const components = elementText(xml, 'supported-calendar-component-set');
+  const name = elementText(xml, 'displayname')?.trim();
+  return {
+    isCalendar: /<(?:[\w.-]+:)?calendar\s*\/?>/.test(resourceType),
+    ...(name ? { name } : {}),
+    holdsEvents: components === undefined || /name\s*=\s*["']VEVENT["']/i.test(components),
+  };
 }
 
 export interface ObjectListing {

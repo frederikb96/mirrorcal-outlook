@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { type BrowserContext, chromium, type Page, type Worker } from 'playwright-core';
 import type { StatusResponse } from '../../src/extension/messages.ts';
+import { extensionIdFromKey } from '../helpers/extension-id.ts';
 import { FakeCalDav } from '../helpers/fake-caldav.ts';
 import { FakeOutlook } from '../helpers/fake-outlook.ts';
 import {
@@ -134,7 +135,8 @@ beforeAll(async () => {
         return outlook.fetch(external, { method: req.method, headers });
       }
       if (host === DAV_HOST) {
-        const body = req.method === 'PUT' || req.method === 'REPORT' ? await req.text() : undefined;
+        const withBody = ['PUT', 'REPORT', 'PROPFIND'].includes(req.method);
+        const body = withBody ? await req.text() : undefined;
         return dav.fetch(external, {
           method: req.method,
           headers,
@@ -251,6 +253,21 @@ describe.skipIf(!available)('extension in Chromium', () => {
     await options.getByRole('button', { name: 'Confirm and apply' }).click();
     await waitFor('the deletions', () => dav.objects.size === 0);
     expect(dav.writes.every((w) => w.method === 'DELETE')).toBe(true);
+  });
+
+  test('saving checks the calendar, names it and shows the first result at once', async () => {
+    const options = await optionsPage();
+    await options.getByRole('button', { name: 'Save', exact: true }).click();
+    await options
+      .locator('#save-message:has-text("Connected to calendar")')
+      .waitFor({ timeout: 10_000 });
+    await options.locator('#save-message:has-text("Synced")').waitFor({ timeout: 10_000 });
+    expect(dav.requests.some((r) => r.method === 'PROPFIND')).toBe(true);
+  });
+
+  test('the extension id is the one the manifest key fixes', async () => {
+    const manifest = JSON.parse(readFileSync(join(root, 'dist', 'manifest.json'), 'utf8'));
+    expect(extensionId).toBe(await extensionIdFromKey(manifest.key));
   });
 
   test('only the two local hosts were ever contacted', () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import pkg from '../package.json' with { type: 'json' };
 import { OUTLOOK_HOSTS } from '../src/core/constants.ts';
 import { buildManifest } from '../src/manifest.ts';
+import { extensionIdFromKey } from './helpers/extension-id.ts';
 
 describe('manifest', () => {
   const manifest = buildManifest(pkg.version);
@@ -20,5 +21,17 @@ describe('manifest', () => {
   test('declares a module service worker and an options page', () => {
     expect(manifest.background).toEqual({ service_worker: 'service-worker.js', type: 'module' });
     expect(manifest.options_ui.page).toBe('options.html');
+  });
+});
+
+describe('extension id', () => {
+  test('is fixed by a public key and does not depend on the install folder', async () => {
+    const { key } = buildManifest(pkg.version);
+    const der = Uint8Array.from(atob(key), (c) => c.charCodeAt(0));
+    // SubjectPublicKeyInfo of an RSA key: a SEQUENCE that names the rsaEncryption algorithm.
+    expect(der[0]).toBe(0x30);
+    expect(Buffer.from(der).includes(Buffer.from('2a864886f70d010101', 'hex'))).toBe(true);
+    const id = await extensionIdFromKey(key);
+    expect(id).toMatch(/^[a-p]{32}$/);
   });
 });

@@ -22,6 +22,20 @@ export const OUTLOOK_TOKEN_AUDIENCE = 'https://outlook.office.com';
 /** Request paths (per Outlook host) on which the page's own bearer token is observed. */
 export const TOKEN_CAPTURE_PATHS = ['/api/*'] as const;
 
+/** A token only replaces a still-usable one when it outlives it by more than this. */
+export const TOKEN_REPLACE_MARGIN_SECONDS = 600;
+
+/** Interval of the extension-API call that keeps the worker alive while a run is active. */
+export const KEEP_ALIVE_MS = 20_000;
+
+/** Identical consecutive failures after which scheduled runs back off... */
+export const BACKOFF_AFTER = 3;
+/** ...to at most one attempt per this many minutes. */
+export const BACKOFF_MINUTES = 60;
+
+/** A failure that persists across this many identical runs is shown on the toolbar icon. */
+export const ATTENTION_AFTER_REPEATS = 3;
+
 export const PAGE_SIZE = 200;
 export const MAX_PAGES = 100;
 export const REQUEST_TIMEOUT_MS = 25_000;

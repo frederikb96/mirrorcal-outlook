@@ -1,8 +1,16 @@
 import { OUTLOOK_HOSTS, TOKEN_CAPTURE_PATHS } from '../core/constants.ts';
-import { isTokenUsable, parseAuthorizationHeader } from '../core/token.ts';
-import type { Request, ResetResponse, StatusResponse, SyncResponse } from './messages.ts';
+import { captureToken } from './capture.ts';
+import type {
+  Request,
+  ResetResponse,
+  SaveResponse,
+  StatusResponse,
+  SyncResponse,
+} from './messages.ts';
 import { runResetFlight, runSyncFlight } from './runner.ts';
-import { loadSettings, loadStatus, loadToken, saveToken } from './storage.ts';
+import { saveSettingsFlow } from './save.ts';
+import { buildStatus } from './status.ts';
+import { clearAccount, loadSettings } from './storage.ts';
 
 const ALARM = 'mirrorcal-sync';
 
@@ -17,29 +25,12 @@ async function ensureAlarm(): Promise<void> {
   });
 }
 
-async function status(): Promise<StatusResponse> {
-  const { settings, stored } = await loadSettings();
-  const token = await loadToken();
-  const saved = await loadStatus();
-  const response: StatusResponse = {
-    configured: stored,
-    enabled: settings.enabled,
-    token: {
-      present: token !== null,
-      usable: isTokenUsable(token, Date.now()),
-      ...(token ? { expiresAt: new Date(token.exp * 1000).toISOString() } : {}),
-    },
-    log: saved.log,
-  };
-  if (saved.lastRun) response.lastRun = saved.lastRun;
-  if (saved.lastSuccessAt) response.lastSuccessAt = saved.lastSuccessAt;
-  return response;
-}
-
-async function handle(request: Request): Promise<StatusResponse | SyncResponse | ResetResponse> {
+async function handle(
+  request: Request,
+): Promise<StatusResponse | SyncResponse | ResetResponse | SaveResponse | Record<string, never>> {
   switch (request.type) {
     case 'status':
-      return status();
+      return buildStatus();
     case 'sync': {
       const admitted = await runSyncFlight({
         trigger: 'manual',
@@ -52,33 +43,26 @@ async function handle(request: Request): Promise<StatusResponse | SyncResponse |
       const admitted = await runResetFlight(request.mode, request.confirmedCount);
       return admitted.busy ? { busy: true } : { busy: false, result: admitted.value };
     }
+    case 'save':
+      return saveSettingsFlow(request.settings);
+    case 'forget-account':
+      await clearAccount();
+      return {};
   }
 }
 
-// Only the page-level GET of the bearer header is observed; the token is never logged.
-let lastHeader = '';
-
-async function remember(header: string): Promise<void> {
-  const parsed = parseAuthorizationHeader(header);
-  if (!parsed) return;
-  const current = await loadToken();
-  if (current && current.exp > parsed.exp && isTokenUsable(current, Date.now())) return;
-  await saveToken(parsed);
-  if (!isTokenUsable(current, Date.now())) void runSyncFlight({ trigger: 'token', mode: 'apply' });
-}
-
+// Only requests the Outlook page itself sent are observed; the token is never logged.
 chrome.webRequest.onSendHeaders.addListener(
   (details) => {
-    if (details.initiator?.startsWith(`chrome-extension://${chrome.runtime.id}`)) return;
-    const header = details.requestHeaders?.find((h) => h.name.toLowerCase() === 'authorization');
-    if (!header?.value || header.value === lastHeader) return;
-    lastHeader = header.value;
-    void remember(header.value);
+    void captureToken(details).then(({ stored, hadUsable }) => {
+      if (stored && !hadUsable) void runSyncFlight({ trigger: 'token', mode: 'apply' });
+    });
   },
   {
     urls: OUTLOOK_HOSTS.flatMap((host) =>
       TOKEN_CAPTURE_PATHS.map((path) => `https://${host}${path}`),
     ),
+    types: ['xmlhttprequest'],
   },
   ['requestHeaders', 'extraHeaders'],
 );

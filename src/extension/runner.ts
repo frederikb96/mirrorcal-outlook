@@ -1,3 +1,5 @@
+import { KEEP_ALIVE_MS } from '../core/constants.ts';
+import { sha256Hex } from '../core/crypto.ts';
 import {
   type PlanView,
   type ResetResult,
@@ -5,16 +7,26 @@ import {
   runSync,
   type SyncResult,
 } from '../core/engine.ts';
-import { validateDestination } from '../core/settings.ts';
+import { originPattern, validateDestination } from '../core/settings.ts';
 import { isTokenUsable } from '../core/token.ts';
+import { showAttention } from './attention.ts';
+import { nextBackoff } from './backoff.ts';
 import type { RunOutcome, RunRecord, Trigger } from './messages.ts';
 import { type Admission, createSingleFlight } from './single-flight.ts';
 import {
+  clearAccount,
   clearToken,
+  loadAccount,
+  loadBackoff,
+  loadPasswordRejected,
   loadSettings,
   loadSyncState,
   loadToken,
   recordRun,
+  saveAccount,
+  saveBackoff,
+  savePasswordRejected,
+  saveRejectedToken,
   saveSyncState,
 } from './storage.ts';
 
@@ -23,7 +35,32 @@ type SyncRun = { record: RunRecord; plan?: PlanView };
 /** One flight for everything that touches the destination, so a reset never overlaps a sync. */
 const flight = createSingleFlight<SyncRun | ResetResult>();
 
-const doFetch = (input: string, init?: RequestInit) => fetch(input, init);
+export const doFetch = (input: string, init?: RequestInit) => fetch(input, init);
+
+const PASSWORD_REJECTED_MESSAGE =
+  'The calendar server rejected the password: enter it again in the settings. Nothing is retried until the settings are saved';
+
+/**
+ * Calls an extension API now and then while `task` runs: a worker is only kept alive by events
+ * and extension API calls, and a long first sync makes neither.
+ */
+export async function keepAliveWhile<T>(
+  task: () => Promise<T>,
+  intervalMs = KEEP_ALIVE_MS,
+): Promise<T> {
+  const timer = setInterval(
+    () => void chrome.runtime.getPlatformInfo().catch(() => {}),
+    intervalMs,
+  );
+  try {
+    return await task();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+const passwordRejected = (result: SyncResult) =>
+  result.error?.source === 'caldav' && result.error.code === 'auth';
 
 function recordOf(
   trigger: Trigger,
@@ -43,8 +80,11 @@ function recordOf(
 }
 
 function recordFromResult(trigger: Trigger, startedAt: Date, result: SyncResult): RunRecord {
-  const record = recordOf(trigger, startedAt, result.outcome, { counts: result.counts });
-  const message = result.message ?? result.error?.message;
+  const rejected = passwordRejected(result);
+  const record = recordOf(trigger, startedAt, rejected ? 'credentials-rejected' : result.outcome, {
+    counts: result.counts,
+  });
+  const message = rejected ? PASSWORD_REJECTED_MESSAGE : (result.message ?? result.error?.message);
   if (message) record.message = message;
   if (result.guard) record.guard = { code: result.guard.code, message: result.guard.message };
   if (result.digest && (result.outcome === 'needs-confirmation' || result.outcome === 'preview')) {
@@ -63,8 +103,11 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
   const startedAt = new Date();
   const preview = request.mode === 'preview';
   const finish = async (record: RunRecord, plan?: PlanView) => {
-    // Previews and idle switch-offs are not runs worth remembering.
-    if (!preview && record.outcome !== 'disabled') await recordRun(record);
+    // Previews and runs that were never attempted are not worth remembering.
+    if (!preview && record.outcome !== 'skipped') {
+      const latest = record.outcome === 'disabled' ? record : await recordRun(record);
+      await showAttention(latest);
+    }
     return plan ? { record, plan } : { record };
   };
 
@@ -76,6 +119,13 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
       }),
     );
   }
+  if (request.trigger !== 'manual' && !preview) {
+    const backoff = await loadBackoff();
+    const waiting = (backoff?.retryAt ?? 0) > Date.now();
+    if ((await loadPasswordRejected()) || waiting) {
+      return finish(recordOf(request.trigger, startedAt, 'skipped'));
+    }
+  }
   const token = await loadToken();
   if (!isTokenUsable(token, Date.now())) {
     return finish(
@@ -84,7 +134,7 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
       }),
     );
   }
-  const origin = `${new URL(settings.caldavUrl).origin}/*`;
+  const origin = originPattern(settings.caldavUrl) as string;
   if (!(await chrome.permissions.contains({ origins: [origin] }))) {
     return finish(
       recordOf(request.trigger, startedAt, 'no-permission', {
@@ -94,9 +144,11 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
   }
 
   const lastState = preview ? undefined : await loadSyncState();
+  const pinned = await loadAccount();
   const result = await runSync({
     fetch: doFetch,
     token: (token as { token: string }).token,
+    ...(pinned ? { expectedAccount: pinned.id } : {}),
     settings,
     now: new Date(),
     mode: request.mode,
@@ -105,9 +157,21 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
       ? { confirmMassChange: true, confirmedPlanDigest: request.confirm.digest }
       : {}),
   });
-  if (result.outcome === 'auth-failed') await clearToken();
-  if (!preview && result.outcome === 'applied') await saveSyncState(result.state);
+  if (result.outcome === 'auth-failed') {
+    await saveRejectedToken(await sha256Hex((token as { token: string }).token));
+    await clearToken();
+  }
   const record = recordFromResult(request.trigger, startedAt, result);
+  if (!preview) {
+    if (result.outcome === 'applied') await saveSyncState(result.state);
+    if (record.outcome === 'credentials-rejected') await savePasswordRejected(true);
+    else if (result.outcome === 'applied') await savePasswordRejected(false);
+    if (result.outcome === 'applied' && result.account && !pinned)
+      await saveAccount(result.account);
+    await saveBackoff(
+      nextBackoff(await loadBackoff(), record, Date.now(), settings.intervalMinutes),
+    );
+  }
   if (preview && result.guard)
     record.guard = { code: result.guard.code, message: result.guard.message };
   return finish(
@@ -120,13 +184,13 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
 export async function runSyncFlight(request: SyncRequest): Promise<Admission<SyncRun>> {
   const guarded = async (): Promise<SyncRun> => {
     try {
-      return await syncOnce(request);
+      return await keepAliveWhile(() => syncOnce(request));
     } catch (error) {
       // Nobody watches a scheduled run, so even an unexpected failure ends up in the status.
       const record = recordOf(request.trigger, new Date(), 'failed', {
         message: error instanceof Error ? error.message : 'Unexpected error',
       });
-      if (request.mode === 'apply') await recordRun(record);
+      if (request.mode === 'apply') await showAttention(await recordRun(record));
       return { record };
     }
   };
@@ -140,27 +204,32 @@ export async function runResetFlight(
   mode: 'count' | 'apply',
   confirmedCount?: number,
 ): Promise<Admission<ResetResult>> {
-  const admitted = await flight.run(async () => {
-    const { settings } = await loadSettings();
-    const startedAt = new Date();
-    const result = await resetMirror({
-      fetch: doFetch,
-      settings,
-      mode,
-      ...(confirmedCount === undefined ? {} : { confirmedCount }),
-    });
-    if (mode === 'apply' && result.outcome === 'reset') {
-      await recordRun({
-        kind: 'reset',
-        trigger: 'manual',
-        startedAt: startedAt.toISOString(),
-        finishedAt: new Date().toISOString(),
-        outcome: 'reset',
-        message: `Deleted ${result.deleted} mirrored events`,
-        repeats: 1,
+  const admitted = await flight.run(() =>
+    keepAliveWhile(async () => {
+      const { settings } = await loadSettings();
+      const startedAt = new Date();
+      const result = await resetMirror({
+        fetch: doFetch,
+        settings,
+        mode,
+        ...(confirmedCount === undefined ? {} : { confirmedCount }),
       });
-    }
-    return result;
-  });
+      if (mode === 'apply' && result.outcome === 'reset') {
+        await clearAccount();
+        await showAttention(
+          await recordRun({
+            kind: 'reset',
+            trigger: 'manual',
+            startedAt: startedAt.toISOString(),
+            finishedAt: new Date().toISOString(),
+            outcome: 'reset',
+            message: `Deleted ${result.deleted} mirrored events`,
+            repeats: 1,
+          }),
+        );
+      }
+      return result;
+    }),
+  );
   return admitted as Admission<ResetResult>;
 }

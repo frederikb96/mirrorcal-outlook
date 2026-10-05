@@ -16,6 +16,8 @@ import { normalizeToken } from './token.ts';
 import {
   type FetchLike,
   type Person,
+  SENSITIVITY_VALUES,
+  type Sensitivity,
   type Settings,
   SHOW_AS_VALUES,
   type ShowAs,
@@ -50,7 +52,16 @@ export function fieldNeeds(settings: Settings): FieldNeeds {
   };
 }
 
-const BASE_FIELDS = ['Id', 'Subject', 'Start', 'End', 'IsAllDay', 'IsCancelled', 'ShowAs'];
+const BASE_FIELDS = [
+  'Id',
+  'Subject',
+  'Start',
+  'End',
+  'IsAllDay',
+  'IsCancelled',
+  'ShowAs',
+  'Sensitivity',
+];
 
 function selectedFields(needs: FieldNeeds): string[] {
   const fields = [...BASE_FIELDS];
@@ -171,6 +182,12 @@ function parseAttendees(value: unknown): SourceAttendee[] {
   return attendees;
 }
 
+/** A missing label is an ordinary event; a label this code does not know is treated as private. */
+function parseSensitivity(value: unknown): Sensitivity {
+  if (value === undefined || value === null) return 'Normal';
+  return SENSITIVITY_VALUES.find((v) => v === value) ?? 'Private';
+}
+
 /** Returns undefined for cancelled instances; throws on anything that is not a usable event. */
 function parseEvent(item: unknown, index: number): SourceEvent | undefined {
   if (!isRecord(item)) return malformed(`item ${index} is not an object`);
@@ -189,6 +206,7 @@ function parseEvent(item: unknown, index: number): SourceEvent | undefined {
     end,
     allDay: item.IsAllDay,
     showAs,
+    sensitivity: parseSensitivity(item.Sensitivity),
   };
   if (isRecord(item.Location) && typeof item.Location.DisplayName === 'string') {
     event.location = item.Location.DisplayName;

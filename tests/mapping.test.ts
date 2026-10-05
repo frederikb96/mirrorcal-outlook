@@ -6,6 +6,7 @@ import {
   isExcluded,
   mapEvent,
   mirrorUid,
+  type TitleMatcher,
 } from '../src/core/mapping.ts';
 import type { SourceEvent } from '../src/core/types.ts';
 import { COLLECTION, NOW, outlookId, testSettings } from './helpers/fixtures.ts';
@@ -18,6 +19,7 @@ function source(overrides: Partial<SourceEvent> = {}): SourceEvent {
     end: '2026-10-06T09:00:00',
     allDay: false,
     showAs: 'Busy',
+    sensitivity: 'Normal',
     location: 'Room 4',
     body: 'Agenda',
     organizer: { name: 'Pat Doe', address: 'pat@example.test' },
@@ -145,7 +147,7 @@ describe('availability', () => {
 
 describe('title filters', () => {
   const matches = (pattern: string, title: string) =>
-    compileTitleFilter(pattern)?.test(title.trim()) ?? false;
+    compileTitleFilter(pattern)?.(title.trim()) ?? false;
 
   test('exact by default, ignoring case and surrounding space', () => {
     expect(matches('Sport', 'Sport')).toBe(true);
@@ -179,7 +181,7 @@ describe('title filters', () => {
   test('filters use the original title, not the replacement', () => {
     const s = testSettings({ titleFilters: ['Planning'] });
     s.policies.title = { mode: 'replace', text: 'Meeting' };
-    expect(isExcluded(source(), s, [compileTitleFilter('Planning') as RegExp])).toBe(true);
+    expect(isExcluded(source(), s, [compileTitleFilter('Planning') as TitleMatcher])).toBe(true);
   });
 
   test('availability exclusion', () => {
@@ -225,5 +227,69 @@ describe('identity', () => {
     );
     expect(desired).toHaveLength(1);
     expect(duplicates).toBe(1);
+  });
+});
+
+describe('title filter cost', () => {
+  test('a many-star pattern against a long title answers in milliseconds', () => {
+    const matcher = compileTitleFilter('*a*a*a*a*a*a*a*a*b') as TitleMatcher;
+    const started = performance.now();
+    expect(matcher('a'.repeat(60))).toBe(false);
+    expect(matcher(`${'a'.repeat(60)}b`)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  test('star runs and edges behave', () => {
+    const matches = (p: string, t: string) => compileTitleFilter(p)?.(t) ?? false;
+    expect(matches('**a**', 'xax')).toBe(true);
+    expect(matches('a*', 'a')).toBe(true);
+    expect(matches('*a', 'ba')).toBe(true);
+    expect(matches('*ab*cd*', 'xxabyycdzz')).toBe(true);
+    expect(matches('*ab*cd*', 'xxcdyyabzz')).toBe(false);
+    expect(matches('a*b*c', 'abc')).toBe(true);
+    expect(matches('a*b*c', 'acb')).toBe(false);
+  });
+});
+
+describe('private events', () => {
+  const secret = (sensitivity: SourceEvent['sensitivity']) =>
+    source({ subject: 'Therapy', sensitivity });
+
+  test('are flagged, retitled and stripped of other fields by default', () => {
+    const s = testSettings();
+    s.policies.description = { mode: 'copy' };
+    s.policies.location = { mode: 'copy' };
+    s.policies.attendees = 'copy';
+    const mapped = mapEvent(secret('Private'), s);
+    expect(mapped).toMatchObject({ summary: 'Private', classification: 'PRIVATE' });
+    expect(mapped.description).toBeUndefined();
+    expect(mapped.location).toBeUndefined();
+    expect(mapped.attendees).toEqual([]);
+    expect(mapped.organizer).toBeUndefined();
+  });
+
+  test('personal is flagged private and confidential confidential', () => {
+    const s = testSettings();
+    expect(mapEvent(secret('Personal'), s).classification).toBe('PRIVATE');
+    expect(mapEvent(secret('Confidential'), s).classification).toBe('CONFIDENTIAL');
+    expect(mapEvent(secret('Normal'), s).classification).toBeUndefined();
+  });
+
+  test('copy keeps every field and the flag', () => {
+    const s = testSettings();
+    s.policies.privateEvents = { mode: 'copy' };
+    s.policies.location = { mode: 'copy' };
+    expect(mapEvent(secret('Private'), s)).toMatchObject({
+      summary: 'Therapy',
+      location: 'Room 4',
+      classification: 'PRIVATE',
+    });
+  });
+
+  test('skip excludes them and only them', () => {
+    const s = testSettings();
+    s.policies.privateEvents = { mode: 'skip' };
+    expect(isExcluded(secret('Private'), s, [])).toBe(true);
+    expect(isExcluded(secret('Normal'), s, [])).toBe(false);
   });
 });

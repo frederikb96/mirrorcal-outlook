@@ -22,9 +22,14 @@
           <button id="sync" type="button">Sync now</button>
           <button id="preview" type="button">Preview changes</button>
           <button id="reset" type="button" class="danger">Reset mirror</button>
+          <button id="forget" type="button">Forget account</button>
         </div>
         <p id="action-message" class="message" role="status"></p>
         <div id="plan" hidden></div>
+        <details id="history" hidden>
+          <summary>Recent runs</summary>
+          <ul id="history-list"></ul>
+        </details>
         <div id="confirm-box" class="banner warn" hidden>
           <p id="confirm-text"></p>
           <button id="confirm" type="button" class="danger">Confirm and apply</button>
@@ -47,12 +52,15 @@
           </label>
           <p class="hint">
             The password is stored unencrypted in this browser profile's extension storage. Use an
-            app password that can be revoked.
+            app password, which can be revoked; it still gives access to the whole account, not just
+            this calendar. It is only ever sent to the server it was entered for.
           </p>
           <label>Owner id <input id="ownerId" type="text" /></label>
           <p class="hint">
             Marks the events this mirror owns. Keep it identical on every browser that mirrors the
-            same calendar.
+            same calendar, and give those browsers identical filters and policies; otherwise they
+            keep rewriting each other's events. Changing it later leaves the events of the old id
+            behind.
           </p>
         </fieldset>
 
@@ -70,7 +78,13 @@
           <div class="policy" data-field="description"><span>Description</span></div>
           <div class="policy" data-field="location"><span>Location</span></div>
           <div class="policy" data-field="attendees"><span>Attendees</span></div>
-          <p class="hint">Time, all-day flag and availability are always mirrored.</p>
+          <div class="policy" data-field="privateEvents"><span>Private events</span></div>
+          <p class="hint">
+            Events Outlook marks private, personal or confidential are always written with a
+            private flag. Unless they are copied, only the replacement title is kept. Time, all-day
+            flag and availability are always mirrored. Copying descriptions reads every event body
+            on each sync.
+          </p>
         </fieldset>
 
         <fieldset>

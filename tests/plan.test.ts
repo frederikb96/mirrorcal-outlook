@@ -13,6 +13,7 @@ function source(n: number, overrides: Partial<SourceEvent> = {}): SourceEvent {
     end: '2026-10-06T09:00:00',
     allDay: false,
     showAs: 'Busy',
+    sensitivity: 'Normal',
     ...overrides,
   };
 }

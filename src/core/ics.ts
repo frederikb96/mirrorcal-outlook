@@ -141,6 +141,7 @@ function eventLines(event: MirrorEvent, meta: IcsMeta): string[] {
   lines.push(`SUMMARY:${escapeText(event.summary)}`);
   if (event.description) lines.push(`DESCRIPTION:${escapeText(event.description)}`);
   if (event.location) lines.push(`LOCATION:${escapeText(event.location)}`);
+  if (event.classification) lines.push(`CLASS:${event.classification}`);
   lines.push(`TRANSP:${event.showAs === 'Free' ? 'TRANSPARENT' : 'OPAQUE'}`);
   if (event.showAs === 'Tentative') lines.push('STATUS:TENTATIVE');
   lines.push(`X-MICROSOFT-CDO-BUSYSTATUS:${BUSY_STATUS[event.showAs]}`);

@@ -1,15 +1,28 @@
 import { OUTLOOK_HOSTS } from '../core/constants.ts';
 import type { PlanEntry, PlanView } from '../core/engine.ts';
-import { validateSettings } from '../core/settings.ts';
-import { type Settings, SHOW_AS_VALUES, type ShowAs, type TextPolicy } from '../core/types.ts';
+import {
+  originPattern,
+  parseWholeNumber,
+  prepareSave,
+  validateSettings,
+} from '../core/settings.ts';
+import {
+  type PrivatePolicy,
+  type Settings,
+  SHOW_AS_VALUES,
+  type ShowAs,
+  type TextPolicy,
+} from '../core/types.ts';
 import type {
   Request,
   ResetResponse,
   RunRecord,
+  SaveResponse,
   StatusResponse,
   SyncResponse,
 } from './messages.ts';
-import { loadSettings, saveSettings } from './storage.ts';
+import { buildStatus } from './status.ts';
+import { loadSettings } from './storage.ts';
 
 const OUTCOME_LABEL: Record<string, string> = {
   applied: 'Synced',
@@ -24,8 +37,36 @@ const OUTCOME_LABEL: Record<string, string> = {
   'no-token': 'Outlook is not open',
   'not-configured': 'Not configured',
   'no-permission': 'No access to the calendar server',
+  'credentials-rejected': 'Calendar server rejected the password',
   reset: 'Mirror reset',
 };
+
+const MODE_LABEL: Record<string, string> = {
+  copy: 'Copy',
+  drop: 'Drop',
+  replace: 'Replace with',
+  skip: 'Do not mirror',
+};
+
+const SHOW_AS_LABEL: Record<ShowAs, string> = {
+  Free: 'Free',
+  Tentative: 'Tentative',
+  Busy: 'Busy',
+  Oof: 'Out of office',
+  WorkingElsewhere: 'Working elsewhere',
+  Unknown: 'Unknown',
+};
+
+/** A run that wrote everything it meant to; one with failed writes is not a clean sync. */
+const hasErrors = (record: RunRecord) => (record.counts?.errors ?? 0) > 0;
+
+function outcomeLabel(record: RunRecord): string {
+  if (record.outcome === 'applied' && hasErrors(record)) return 'Synced with errors';
+  return OUTCOME_LABEL[record.outcome] ?? record.outcome;
+}
+
+const isClean = (record: RunRecord | undefined, outcome: string) =>
+  record?.outcome === outcome && !hasErrors(record);
 
 const PREVIEW_LIMIT = 200;
 
@@ -49,6 +90,10 @@ function setMessage(text: string, kind: 'info' | 'error' = 'info', target = 'act
 
 type PolicyField = 'title' | 'description' | 'location';
 const POLICY_FIELDS: PolicyField[] = ['title', 'description', 'location'];
+const MODES: Record<string, string[]> = {
+  attendees: ['copy', 'drop'],
+  privateEvents: ['copy', 'replace', 'skip'],
+};
 
 function buildForm() {
   for (const host of OUTLOOK_HOSTS) {
@@ -56,10 +101,10 @@ function buildForm() {
   }
   for (const row of document.querySelectorAll<HTMLElement>('.policy')) {
     const field = row.dataset.field as string;
-    const modes = field === 'attendees' ? ['copy', 'drop'] : ['copy', 'drop', 'replace'];
+    const modes = MODES[field] ?? ['copy', 'drop', 'replace'];
     const select = document.createElement('select');
     select.id = `policy-${field}`;
-    for (const mode of modes) select.append(new Option(mode, mode));
+    for (const mode of modes) select.append(new Option(MODE_LABEL[mode], mode));
     row.append(select);
     if (field !== 'attendees') {
       const text = document.createElement('input');
@@ -70,6 +115,7 @@ function buildForm() {
       select.addEventListener('change', () => {
         text.hidden = select.value !== 'replace';
       });
+      text.hidden = select.value !== 'replace';
     }
   }
   const box = el('showAsBox');
@@ -79,7 +125,7 @@ function buildForm() {
     input.type = 'checkbox';
     input.value = value;
     input.name = 'excludeShowAs';
-    label.append(input, ` ${value}`);
+    label.append(input, ` ${SHOW_AS_LABEL[value]}`);
     box.append(label);
   }
 }
@@ -106,6 +152,11 @@ function fillForm(settings: Settings) {
     text.hidden = policy.mode !== 'replace';
   }
   el<HTMLSelectElement>('policy-attendees').value = settings.policies.attendees;
+  const hidden = settings.policies.privateEvents;
+  el<HTMLSelectElement>('policy-privateEvents').value = hidden.mode;
+  el<HTMLInputElement>('policy-privateEvents-text').value =
+    hidden.mode === 'replace' ? hidden.text : '';
+  el<HTMLInputElement>('policy-privateEvents-text').hidden = hidden.mode !== 'replace';
   el<HTMLTextAreaElement>('titleFilters').value = settings.titleFilters.join('\n');
   for (const box of document.querySelectorAll<HTMLInputElement>('input[name="excludeShowAs"]')) {
     box.checked = settings.excludeShowAs.includes(box.value as ShowAs);
@@ -118,23 +169,33 @@ function readPolicy(field: PolicyField): TextPolicy {
   return { mode: mode as 'copy' | 'drop' };
 }
 
-function readForm(existing: Settings): Settings {
+function readPrivatePolicy(): PrivatePolicy {
+  const mode = el<HTMLSelectElement>('policy-privateEvents').value;
+  if (mode === 'replace') {
+    return { mode, text: el<HTMLInputElement>('policy-privateEvents-text').value };
+  }
+  return { mode: mode as 'copy' | 'skip' };
+}
+
+/** The form as typed; an empty password field stays empty (the stored one is applied on save). */
+function readForm(): Settings {
   const value = (id: string) => el<HTMLInputElement>(id).value.trim();
   return {
     enabled: el<HTMLInputElement>('enabled').checked,
     caldavUrl: value('caldavUrl'),
     username: value('username'),
-    password: el<HTMLInputElement>('password').value || existing.password,
+    password: el<HTMLInputElement>('password').value,
     ownerId: value('ownerId'),
     outlookHost: el<HTMLSelectElement>('outlookHost').value as Settings['outlookHost'],
-    daysBack: Number(value('daysBack')),
-    daysAhead: Number(value('daysAhead')),
-    intervalMinutes: Number(value('intervalMinutes')),
+    daysBack: parseWholeNumber(value('daysBack')),
+    daysAhead: parseWholeNumber(value('daysAhead')),
+    intervalMinutes: parseWholeNumber(value('intervalMinutes')),
     policies: {
       title: readPolicy('title'),
       description: readPolicy('description'),
       location: readPolicy('location'),
       attendees: el<HTMLSelectElement>('policy-attendees').value as 'copy' | 'drop',
+      privateEvents: readPrivatePolicy(),
     },
     titleFilters: el<HTMLTextAreaElement>('titleFilters')
       .value.split('\n')
@@ -148,17 +209,17 @@ function readForm(existing: Settings): Settings {
 
 let current: Settings;
 
-async function onSave(event: Event) {
-  event.preventDefault();
-  const draft = readForm(current);
-  const errors = validateSettings(draft);
+async function save() {
+  const draft = readForm();
+  const prepared = prepareSave(current, draft);
+  const errors = 'errors' in prepared ? prepared.errors : validateSettings(prepared.settings);
   if (errors.length > 0) {
     setMessage(errors.join('. '), 'error', 'save-message');
     return;
   }
   // Requested first: the browser only grants it inside the click's user gesture.
   const granted = await chrome.permissions.request({
-    origins: [`${new URL(draft.caldavUrl).origin}/*`],
+    origins: [originPattern(draft.caldavUrl) as string],
   });
   if (!granted) {
     setMessage(
@@ -168,11 +229,33 @@ async function onSave(event: Event) {
     );
     return;
   }
-  await saveSettings(draft);
-  current = draft;
-  fillForm(draft);
-  setMessage('Saved', 'info', 'save-message');
-  await refreshStatus();
+  setMessage('Checking the calendar and saving…', 'info', 'save-message');
+  const response = await send<SaveResponse>({ type: 'save', settings: draft });
+  if (!response.saved) {
+    setMessage(
+      `Nothing saved: ${(response.errors ?? ['unknown error']).join('. ')}`,
+      'error',
+      'save-message',
+    );
+    return;
+  }
+  current = (await loadSettings()).settings;
+  fillForm(current);
+  const sync = response.sync;
+  const outcome = sync && !sync.busy ? describe(sync) : 'A sync was already running';
+  setMessage(`Saved. ${response.connection ?? ''} ${outcome}`.trim(), 'info', 'save-message');
+  if (sync) showSyncResult(sync);
+}
+
+async function onSave(event: Event) {
+  event.preventDefault();
+  await busyWhile(async () => {
+    try {
+      await save();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed', 'error', 'save-message');
+    }
+  });
 }
 
 // ---- status ---------------------------------------------------------------------------------
@@ -208,6 +291,13 @@ function renderStatus(status: StatusResponse) {
   );
   addRow(
     list,
+    'Mirroring account',
+    status.account
+      ? `${status.account.label}${status.account.pinned ? '' : ' (bound after the first successful sync)'}`
+      : 'not seen yet: open Outlook in this browser',
+  );
+  addRow(
+    list,
     'Outlook session',
     status.token.usable
       ? `seen, valid until ${when(status.token.expiresAt as string)}`
@@ -215,11 +305,7 @@ function renderStatus(status: StatusResponse) {
   );
   const run = status.lastRun;
   if (run) {
-    addRow(
-      list,
-      'Last run',
-      `${when(run.finishedAt)}: ${OUTCOME_LABEL[run.outcome] ?? run.outcome}`,
-    );
+    addRow(list, 'Last run', `${when(run.finishedAt)}: ${outcomeLabel(run)}`);
     const counts = countsLine(run);
     if (counts) addRow(list, 'Changes', counts);
     if (run.counts) {
@@ -234,13 +320,22 @@ function renderStatus(status: StatusResponse) {
     addRow(list, 'Last run', 'never');
   }
   if (status.lastSuccessAt) addRow(list, 'Last success', when(status.lastSuccessAt));
+  if (status.retryAt) {
+    addRow(list, 'Next attempt', `${when(status.retryAt)} (the same failure keeps repeating)`);
+  }
 
   const banner = el('banner');
   const waiting = run?.outcome === 'needs-confirmation';
-  banner.hidden = !waiting;
+  banner.hidden = !waiting && !status.passwordRejected;
+  banner.className = 'banner warn';
+  banner.replaceChildren();
+  if (status.passwordRejected) {
+    const text = document.createElement('p');
+    text.textContent =
+      'The calendar server rejected the password. Nothing is retried until you save the settings again.';
+    banner.append(text);
+  }
   if (waiting) {
-    banner.className = 'banner warn';
-    banner.replaceChildren();
     const text = document.createElement('p');
     text.textContent = `The last run was held back: ${run.guard?.message ?? run.message ?? ''}. Nothing was changed.`;
     const review = document.createElement('button');
@@ -249,10 +344,28 @@ function renderStatus(status: StatusResponse) {
     review.addEventListener('click', () => void onPreview());
     banner.append(text, review);
   }
+  renderHistory(status.log);
+}
+
+function renderHistory(log: RunRecord[]) {
+  const list = el('history-list');
+  list.replaceChildren();
+  for (const record of log) {
+    const parts = [
+      when(record.finishedAt),
+      outcomeLabel(record) + (record.repeats > 1 ? ` (${record.repeats} times)` : ''),
+      countsLine(record),
+      record.message,
+    ];
+    const item = document.createElement('li');
+    item.textContent = parts.filter(Boolean).join(': ');
+    list.append(item);
+  }
+  el('history').hidden = log.length === 0;
 }
 
 async function refreshStatus() {
-  renderStatus(await send<StatusResponse>({ type: 'status' }));
+  renderStatus(await buildStatus());
 }
 
 // ---- plan preview ---------------------------------------------------------------------------
@@ -298,9 +411,8 @@ function renderPlan(plan: PlanView, open: 'deletions' | 'creations' | undefined)
   ];
   for (const g of groups) if (g) box.append(g);
   const sections = box.querySelectorAll('details');
-  if (open === 'deletions') {
-    for (const d of sections) if (d.textContent?.startsWith('Delete')) d.open = true;
-  }
+  const focus = open === 'deletions' ? 'Delete' : open === 'creations' ? 'Create' : undefined;
+  for (const d of sections) if (focus && d.textContent?.startsWith(focus)) d.open = true;
   if (sections.length === 0) box.textContent = 'Nothing to change.';
   box.hidden = false;
 }
@@ -316,7 +428,7 @@ function showConfirm(record: RunRecord | undefined) {
 
 // ---- actions --------------------------------------------------------------------------------
 
-const BUTTONS = ['sync', 'preview', 'reset', 'confirm'];
+const BUTTONS = ['sync', 'preview', 'reset', 'confirm', 'save', 'forget'];
 
 async function busyWhile(work: () => Promise<void>) {
   for (const id of BUTTONS) el<HTMLButtonElement>(id).disabled = true;
@@ -333,12 +445,24 @@ async function busyWhile(work: () => Promise<void>) {
 function describe(response: SyncResponse): string {
   if (response.busy) return 'A sync is already running. Try again in a moment.';
   const record = response.record as RunRecord;
-  const parts = [
-    OUTCOME_LABEL[record.outcome] ?? record.outcome,
-    countsLine(record),
-    record.message,
-  ];
+  const parts = [outcomeLabel(record), countsLine(record), record.message];
   return parts.filter(Boolean).join(': ');
+}
+
+/** The group of the plan the held-back reason is about. */
+function planFocus(record: RunRecord | undefined): 'deletions' | 'creations' | undefined {
+  const code = record?.guard?.code;
+  if (code === 'other-owner' || code === 'foreign-destination') return 'creations';
+  return code ? 'deletions' : undefined;
+}
+
+/** Shows what a sync that was started from the page left behind: plan and confirmation. */
+function showSyncResult(response: SyncResponse) {
+  if (response.plan) renderPlan(response.plan, planFocus(response.record));
+  if (response.record?.outcome === 'needs-confirmation') {
+    showConfirm(response.record);
+    el('status-panel').scrollIntoView();
+  }
 }
 
 async function onSync() {
@@ -347,9 +471,8 @@ async function onSync() {
     showConfirm(undefined);
     setMessage('Syncing…');
     const response = await send<SyncResponse>({ type: 'sync', mode: 'apply' });
-    setMessage(describe(response), response.record?.outcome === 'applied' ? 'info' : 'error');
-    if (response.plan) renderPlan(response.plan, 'deletions');
-    if (response.record?.outcome === 'needs-confirmation') showConfirm(response.record);
+    setMessage(describe(response), isClean(response.record, 'applied') ? 'info' : 'error');
+    showSyncResult(response);
   });
 }
 
@@ -358,8 +481,8 @@ async function onPreview() {
     showConfirm(undefined);
     setMessage('Reading Outlook and the calendar…');
     const response = await send<SyncResponse>({ type: 'sync', mode: 'preview' });
-    setMessage(describe(response), response.record?.outcome === 'preview' ? 'info' : 'error');
-    if (response.plan) renderPlan(response.plan, response.record?.guard ? 'deletions' : undefined);
+    setMessage(describe(response), isClean(response.record, 'preview') ? 'info' : 'error');
+    if (response.plan) renderPlan(response.plan, planFocus(response.record));
     showConfirm(response.record);
   });
 }
@@ -370,9 +493,18 @@ async function onConfirm() {
   await busyWhile(async () => {
     setMessage('Applying…');
     const response = await send<SyncResponse>({ type: 'sync', mode: 'apply', confirm: { digest } });
-    setMessage(describe(response), response.record?.outcome === 'applied' ? 'info' : 'error');
+    setMessage(describe(response), isClean(response.record, 'applied') ? 'info' : 'error');
+    // A busy answer changed nothing: the confirmation stays available.
+    if (response.busy) return;
     showConfirm(response.record?.outcome === 'needs-confirmation' ? response.record : undefined);
     if (response.record?.outcome === 'applied') el('plan').hidden = true;
+  });
+}
+
+async function onForgetAccount() {
+  await busyWhile(async () => {
+    await send({ type: 'forget-account' });
+    setMessage('The next sync binds the mirror to the account of the open Outlook session.');
   });
 }
 
@@ -384,7 +516,7 @@ async function onReset() {
       setMessage(result?.message ?? 'A sync is already running. Try again in a moment.', 'error');
       return;
     }
-    const question = `Delete all ${result.own} mirrored events from the calendar? ${result.foreign} other objects are left alone. The next sync recreates the mirror.`;
+    const question = `Delete all ${result.own} mirrored events from the calendar? ${result.foreign} other objects are left alone. While syncing is on, the next run recreates the mirror: switch syncing off first to stop mirroring.`;
     if (result.own === 0 || !window.confirm(question)) {
       setMessage(result.own === 0 ? 'Nothing to delete.' : 'Cancelled.');
       return;
@@ -404,6 +536,20 @@ async function onReset() {
   });
 }
 
+let refreshing = false;
+
+/** Redraws the status whenever the stored state changes; several changes at once draw once. */
+function watchStorage() {
+  chrome.storage.onChanged.addListener(() => {
+    if (refreshing) return;
+    refreshing = true;
+    queueMicrotask(() => {
+      refreshing = false;
+      void refreshStatus();
+    });
+  });
+}
+
 async function init() {
   buildForm();
   current = (await loadSettings()).settings;
@@ -413,8 +559,9 @@ async function init() {
   el('preview').addEventListener('click', () => void onPreview());
   el('confirm').addEventListener('click', () => void onConfirm());
   el('reset').addEventListener('click', () => void onReset());
+  el('forget').addEventListener('click', () => void onForgetAccount());
   await refreshStatus();
-  setInterval(() => void refreshStatus(), 5000);
+  watchStorage();
 }
 
 void init();

@@ -1,10 +1,18 @@
-import { OUTLOOK_TOKEN_AUDIENCE } from './constants.ts';
+import { OUTLOOK_HOSTS, OUTLOOK_TOKEN_AUDIENCE } from './constants.ts';
+
+/** Who a token was issued to: a stable key for comparison and a readable name for display. */
+export interface TokenAccount {
+  id: string;
+  label: string;
+}
 
 export interface CapturedToken {
   /** The bare JWT, without the `Bearer ` prefix. */
   token: string;
   /** Expiry, seconds since the epoch. */
   exp: number;
+  /** Absent when the token carries no tenant and user claims. */
+  account?: TokenAccount;
 }
 
 const JWT_PART = '[A-Za-z0-9_-]+';
@@ -28,6 +36,34 @@ function decodePayload(jwt: string): Record<string, unknown> | null {
   }
 }
 
+function claim(payload: Record<string, unknown>, name: string): string | undefined {
+  const value = payload[name];
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+function accountOf(payload: Record<string, unknown>): TokenAccount | undefined {
+  const tenant = claim(payload, 'tid');
+  const name =
+    claim(payload, 'upn') ??
+    claim(payload, 'unique_name') ??
+    claim(payload, 'preferred_username') ??
+    claim(payload, 'email');
+  const user = claim(payload, 'oid') ?? name;
+  if (!tenant || !user) return undefined;
+  return { id: `${tenant}/${user}`, label: name ?? user };
+}
+
+/** The tenant and user a token was issued to, or undefined when it does not say. */
+export function tokenAccount(jwt: string): TokenAccount | undefined {
+  const payload = decodePayload(jwt);
+  return payload ? accountOf(payload) : undefined;
+}
+
+/** True for a request that the Outlook web page itself sent, and for nothing else. */
+export function isOutlookInitiator(initiator: string | undefined): boolean {
+  return OUTLOOK_HOSTS.some((host) => initiator === `https://${host}`);
+}
+
 /**
  * Reads the value of an `Authorization` request header. Returns the token only when it is a bearer
  * JWT issued for the Outlook API; tokens for any other service the page talks to are ignored.
@@ -41,7 +77,8 @@ export function parseAuthorizationHeader(header: string): CapturedToken | null {
   const { aud, exp } = payload;
   if (aud !== OUTLOOK_TOKEN_AUDIENCE) return null;
   if (typeof exp !== 'number' || !Number.isFinite(exp)) return null;
-  return { token, exp };
+  const account = accountOf(payload);
+  return account ? { token, exp, account } : { token, exp };
 }
 
 /** Accepts a bare token or a full `Bearer …` header value; rejects anything that is not a JWT. */

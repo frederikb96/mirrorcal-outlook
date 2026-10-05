@@ -3,6 +3,8 @@ import {
   DEFAULT_SETTINGS,
   mergeWithDefaults,
   normalizeCaldavUrl,
+  parseWholeNumber,
+  prepareSave,
   validateDestination,
   validateSettings,
 } from '../src/core/settings.ts';
@@ -18,6 +20,7 @@ describe('defaults', () => {
       description: { mode: 'drop' },
       location: { mode: 'drop' },
       attendees: 'drop',
+      privateEvents: { mode: 'replace', text: 'Private' },
     });
   });
 
@@ -74,5 +77,69 @@ describe('validation', () => {
   test('urls get a trailing slash', () => {
     expect(normalizeCaldavUrl(' https://h/x ')).toBe('https://h/x/');
     expect(normalizeCaldavUrl('https://h/x/')).toBe('https://h/x/');
+  });
+});
+
+describe('destination safety', () => {
+  test('the Outlook hosts are not a calendar server', () => {
+    for (const host of ['outlook.office.com', 'outlook.office365.com', 'outlook.cloud.microsoft']) {
+      expect(validateDestination(testSettings({ caldavUrl: `https://${host}/x/` }))).toContain(
+        'Calendar URL must not point at Outlook',
+      );
+    }
+  });
+});
+
+describe('saving a draft', () => {
+  const existing = testSettings();
+
+  test('an empty password keeps the stored one for the same server', () => {
+    const result = prepareSave(existing, testSettings({ password: '', username: 'bob' }));
+    expect('settings' in result && result.settings.password).toBe(existing.password);
+  });
+
+  test('an empty password is refused for another origin', () => {
+    const result = prepareSave(
+      existing,
+      testSettings({ password: '', caldavUrl: 'https://other.example.test/dav/' }),
+    );
+    expect('errors' in result && result.errors[0]).toContain('new calendar server');
+  });
+
+  test('another origin with its own password is accepted', () => {
+    const draft = testSettings({ password: 'new-one', caldavUrl: 'https://other.example.test/d/' });
+    expect(prepareSave(existing, draft)).toEqual({ settings: draft });
+  });
+
+  test('a password is required when none is stored', () => {
+    const result = prepareSave(testSettings({ password: '' }), testSettings({ password: '' }));
+    expect('errors' in result && result.errors).toEqual(['Password is required']);
+  });
+});
+
+describe('form numbers', () => {
+  test('empty or blank text is not a number', () => {
+    expect(Number.isNaN(parseWholeNumber(''))).toBe(true);
+    expect(Number.isNaN(parseWholeNumber('  '))).toBe(true);
+    expect(parseWholeNumber('0')).toBe(0);
+    expect(parseWholeNumber(' 30 ')).toBe(30);
+    expect(validateSettings(testSettings({ daysBack: parseWholeNumber('') }))).toHaveLength(1);
+  });
+});
+
+describe('private events policy', () => {
+  test('accepts the three modes and refuses others', () => {
+    for (const privateEvents of [
+      { mode: 'copy' },
+      { mode: 'skip' },
+      { mode: 'replace', text: 'Private' },
+    ] as const) {
+      const s = testSettings();
+      s.policies.privateEvents = privateEvents;
+      expect(validateSettings(s)).toEqual([]);
+    }
+    const bad = testSettings();
+    bad.policies.privateEvents = { mode: 'drop' } as never;
+    expect(validateSettings(bad)).toHaveLength(1);
   });
 });

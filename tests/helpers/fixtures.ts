@@ -37,6 +37,7 @@ export interface RawEventInit {
   allDay?: boolean;
   showAs?: string;
   cancelled?: boolean;
+  sensitivity?: string;
   location?: string;
   body?: string;
   organizer?: { name: string; address: string };
@@ -54,6 +55,7 @@ export function rawEvent(init: RawEventInit): Record<string, unknown> {
     IsCancelled: init.cancelled ?? false,
     ShowAs: init.showAs ?? 'Busy',
   };
+  if (init.sensitivity !== undefined) event.Sensitivity = init.sensitivity;
   if (init.location !== undefined) event.Location = { DisplayName: init.location };
   if (init.body !== undefined) event.Body = { ContentType: 'Text', Content: init.body };
   if (init.organizer) {

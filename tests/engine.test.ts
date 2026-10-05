@@ -300,7 +300,7 @@ describe('the destination is treated as owned, but only by marker', () => {
     const squat =
       'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:squatter\r\nSUMMARY:Mine\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n';
     dav.seed(`${target?.uid}.ics`, squat);
-    const result = await run();
+    const result = await run({ confirmMassChange: true });
     expect(result.counts.conflicts).toBe(1);
     expect(dav.objects.get(`${target?.uid}.ics`)?.ics).toBe(squat);
     expect(dav.objects.size).toBe(7);

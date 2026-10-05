@@ -13,6 +13,19 @@ export const SHOW_AS_VALUES: readonly ShowAs[] = [
   'Unknown',
 ];
 
+/** Outlook's sensitivity label of an event. */
+export type Sensitivity = 'Normal' | 'Personal' | 'Private' | 'Confidential';
+
+export const SENSITIVITY_VALUES: readonly Sensitivity[] = [
+  'Normal',
+  'Personal',
+  'Private',
+  'Confidential',
+];
+
+/** CLASS value an event is written with; absent for ordinary events. */
+export type Classification = 'PRIVATE' | 'CONFIDENTIAL';
+
 export interface Person {
   name: string;
   address: string;
@@ -35,6 +48,7 @@ export interface SourceEvent {
   end: string;
   allDay: boolean;
   showAs: ShowAs;
+  sensitivity: Sensitivity;
   location?: string;
   body?: string;
   organizer?: Person;
@@ -42,6 +56,9 @@ export interface SourceEvent {
 }
 
 export type TextPolicy = { mode: 'copy' } | { mode: 'drop' } | { mode: 'replace'; text: string };
+
+/** What happens to events Outlook marks as private, personal or confidential. */
+export type PrivatePolicy = { mode: 'copy' } | { mode: 'replace'; text: string } | { mode: 'skip' };
 
 export type AttendeePolicy = 'copy' | 'drop';
 
@@ -60,6 +77,7 @@ export interface Settings {
     description: TextPolicy;
     location: TextPolicy;
     attendees: AttendeePolicy;
+    privateEvents: PrivatePolicy;
   };
   /** Title patterns; matched case-insensitively against the trimmed title, `*` is a wildcard. */
   titleFilters: string[];
@@ -77,6 +95,7 @@ export interface MirrorEvent {
   start: string;
   end: string;
   showAs: ShowAs;
+  classification?: Classification;
   organizer?: Person;
   attendees: SourceAttendee[];
 }

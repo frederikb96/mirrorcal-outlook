@@ -13,13 +13,26 @@
  * (`bun run build:engine`).
  */
 import { applyPlan, type OpError } from './apply.ts';
-import { CalDavError, type CalDavTarget, getCtag, listObjects } from './caldav.ts';
+import {
+  CalDavError,
+  type CalDavTarget,
+  getCtag,
+  inspectCollection,
+  listObjects,
+} from './caldav.ts';
 import { evaluateGuards, type GuardVerdict } from './guards.ts';
 import { buildDesired } from './mapping.ts';
 import { fieldNeeds, OutlookReadError, readCalendarView } from './outlook.ts';
-import { classifyRemote, desiredDigest, type Plan, planDigest, planSync } from './plan.ts';
+import {
+  classifyRemote,
+  desiredDigest,
+  otherOwnersOf,
+  type Plan,
+  planDigest,
+  planSync,
+} from './plan.ts';
 import { normalizeCaldavUrl, validateDestination, validateSettings } from './settings.ts';
-import { normalizeToken } from './token.ts';
+import { normalizeToken, type TokenAccount, tokenAccount } from './token.ts';
 import type { FetchLike, Settings } from './types.ts';
 
 export type Outcome =
@@ -37,6 +50,11 @@ export interface RunOptions {
   fetch: FetchLike;
   /** Outlook bearer token, bare or as a full `Bearer …` header value. */
   token: string;
+  /**
+   * Id of the account this mirror is bound to (`SyncResult.account.id` of an earlier run). A token
+   * issued to anyone else is refused before anything is read.
+   */
+  expectedAccount?: string;
   settings: Settings;
   now: Date;
   /** `preview` plans without writing anything. */
@@ -113,6 +131,8 @@ export interface SyncResult {
   guard?: Exclude<GuardVerdict, { ok: true }>;
   /** Fingerprint of the plan; pass it back as `confirmedPlanDigest` together with `confirmMassChange`. */
   digest?: string;
+  /** Whom the Outlook token was issued to, when it says; set once Outlook has been read. */
+  account?: TokenAccount;
   /** True when the destination was found unchanged and not read. */
   skipped?: boolean;
   /** Present after a quiet, error-free apply run: pass it back as `lastState`. */
@@ -214,6 +234,15 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
   } catch {
     return fail('auth-failed', 'outlook', 'no-token', 'No usable Outlook token');
   }
+  const account = tokenAccount(token);
+  if (options.expectedAccount !== undefined && account?.id !== options.expectedAccount) {
+    return fail(
+      'auth-failed',
+      'outlook',
+      'wrong-account',
+      'The Outlook session belongs to a different account than the mirrored one',
+    );
+  }
 
   const counts = emptyCounts();
   const target = destinationTarget(settings);
@@ -240,6 +269,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
       throw error;
     }
     counts.source = read.rawCount;
+    const accountField = account ? { account } : {};
 
     const { desired, filtered, duplicates } = await buildDesired(
       read.events,
@@ -253,7 +283,21 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
 
     const digestOfDesired = await desiredDigest(desired, target.url);
     // One small request tells whether anything in the calendar moved since the last quiet run.
-    const ctag = options.mode === 'apply' ? await getCtag(options.fetch, target) : undefined;
+    let ctag: string | undefined;
+    if (options.mode === 'apply') {
+      try {
+        ctag = await getCtag(options.fetch, target);
+      } catch (error) {
+        if (error instanceof CalDavError) {
+          return {
+            ...fail('destination-failed', 'caldav', error.code, error.message, counts),
+            window,
+            ...accountField,
+          };
+        }
+        throw error;
+      }
+    }
     const last = options.lastState;
     if (ctag && last && last.ctag === ctag && last.digest === digestOfDesired) {
       counts.own = last.own;
@@ -266,6 +310,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
         counts,
         skipped: true,
         state: last,
+        ...accountField,
         errors: [],
       };
     }
@@ -278,6 +323,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
         return {
           ...fail('destination-failed', 'caldav', error.code, error.message, counts),
           window,
+          ...accountField,
         };
       }
       throw error;
@@ -298,10 +344,14 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
       sourceCount: read.rawCount,
       deletions: plan.deletions.length,
       ownCount: plan.ownCount,
+      creations: plan.creations.length,
+      foreignCount: plan.foreign.length,
+      otherOwners: otherOwnersOf(plan.foreign),
     });
     const result: SyncResult = {
       outcome: 'preview',
       window,
+      ...accountField,
       counts,
       plan: view(plan, options.includeIcs === true),
       digest,
@@ -339,11 +389,56 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
         foreign: plan.foreign.length,
       };
     }
-    if (applied.stopped) result.message = applied.stopped;
+    const first = applied.errors[0];
+    if (applied.stopped) {
+      result.message = applied.stopped;
+      result.error = { source: 'caldav', code: 'auth', message: applied.stopped };
+    } else if (first) {
+      result.message = first.message;
+    }
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected error';
     return { ...fail('failed', 'engine', 'unexpected', message, counts), window };
+  }
+}
+
+export interface CheckResult {
+  outcome: 'ok' | 'not-a-calendar' | 'auth-failed' | 'unreachable' | 'failed' | 'invalid-settings';
+  message: string;
+  /** The calendar's display name, when the server gives one. */
+  name?: string;
+}
+
+/** Asks the server what the configured URL is, without writing anything. */
+export async function checkDestination(options: {
+  fetch: FetchLike;
+  settings: Settings;
+}): Promise<CheckResult> {
+  const problems = validateDestination(options.settings);
+  if (problems.length > 0) {
+    return { outcome: 'invalid-settings', message: problems.join('; ') };
+  }
+  try {
+    const info = await inspectCollection(options.fetch, destinationTarget(options.settings));
+    if (!info.isCalendar) {
+      return { outcome: 'not-a-calendar', message: 'This URL is not a calendar collection' };
+    }
+    if (!info.holdsEvents) {
+      return { outcome: 'not-a-calendar', message: 'This calendar does not hold events' };
+    }
+    return {
+      outcome: 'ok',
+      message: info.name ? `Connected to calendar '${info.name}'` : 'Connected to the calendar',
+      ...(info.name ? { name: info.name } : {}),
+    };
+  } catch (error) {
+    if (error instanceof CalDavError) {
+      const outcome =
+        error.code === 'auth' ? 'auth-failed' : error.code === 'network' ? 'unreachable' : 'failed';
+      return { outcome, message: error.message };
+    }
+    return { outcome: 'failed', message: error instanceof Error ? error.message : 'Failed' };
   }
 }
 

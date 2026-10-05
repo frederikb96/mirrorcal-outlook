@@ -1,27 +1,75 @@
 import { FALLBACK_TITLE, UID_HEX_LENGTH, UID_PREFIX } from './constants.ts';
 import { sha256Hex } from './crypto.ts';
 import { buildEventIcs } from './ics.ts';
-import type { DesiredObject, MirrorEvent, Settings, SourceEvent, TextPolicy } from './types.ts';
+import type {
+  Classification,
+  DesiredObject,
+  MirrorEvent,
+  Sensitivity,
+  Settings,
+  SourceEvent,
+  TextPolicy,
+} from './types.ts';
 
-/** `*` is the only wildcard; everything else matches literally, ignoring case. */
-export function compileTitleFilter(pattern: string): RegExp | null {
-  const trimmed = pattern.trim();
-  if (trimmed === '') return null;
-  const source = trimmed
-    .split('*')
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
-    .join('.*');
-  return new RegExp(`^${source}$`, 'isu');
+export type TitleMatcher = (title: string) => boolean;
+
+const codePoints = (text: string) => Array.from(text.toLowerCase());
+
+/** Glob match, `*` being the only wildcard. Linear scan that backtracks to the last `*` only. */
+function globMatches(pattern: string[], text: string[]): boolean {
+  let p = 0;
+  let t = 0;
+  let star = -1;
+  let resume = 0;
+  while (t < text.length) {
+    if (pattern[p] === '*') {
+      star = p;
+      resume = t;
+      p += 1;
+    } else if (p < pattern.length && pattern[p] === text[t]) {
+      p += 1;
+      t += 1;
+    } else if (star >= 0) {
+      p = star + 1;
+      resume += 1;
+      t = resume;
+    } else {
+      return false;
+    }
+  }
+  while (pattern[p] === '*') p += 1;
+  return p === pattern.length;
 }
 
-export function compileTitleFilters(patterns: string[]): RegExp[] {
+/** `*` is the only wildcard; everything else matches literally, ignoring case. */
+export function compileTitleFilter(pattern: string): TitleMatcher | null {
+  const trimmed = pattern.trim();
+  if (trimmed === '') return null;
+  const glob = codePoints(trimmed);
+  return (title) => globMatches(glob, codePoints(title));
+}
+
+export function compileTitleFilters(patterns: string[]): TitleMatcher[] {
   return patterns.flatMap((p) => compileTitleFilter(p) ?? []);
 }
 
-export function isExcluded(event: SourceEvent, settings: Settings, filters: RegExp[]): boolean {
+/** Outlook's own label, mapped to what CLASS says; ordinary events have none. */
+export function classificationOf(sensitivity: Sensitivity): Classification | undefined {
+  if (sensitivity === 'Normal') return undefined;
+  return sensitivity === 'Confidential' ? 'CONFIDENTIAL' : 'PRIVATE';
+}
+
+export function isExcluded(
+  event: SourceEvent,
+  settings: Settings,
+  filters: TitleMatcher[],
+): boolean {
   if (settings.excludeShowAs.includes(event.showAs)) return true;
+  if (classificationOf(event.sensitivity) && settings.policies.privateEvents.mode === 'skip') {
+    return true;
+  }
   const title = event.subject.trim();
-  return filters.some((filter) => filter.test(title));
+  return filters.some((matches) => matches(title));
 }
 
 function cleanText(value: string | undefined): string | undefined {
@@ -43,7 +91,13 @@ function addDay(date: string): string {
 
 export function mapEvent(event: SourceEvent, settings: Settings): MirrorEvent {
   const { policies } = settings;
-  const summary = applyPolicy(event.subject, policies.title)?.replace(/\s*\n\s*/g, ' ');
+  const classification = classificationOf(event.sensitivity);
+  const privatePolicy = policies.privateEvents;
+  // A private event shown under a neutral title must not give itself away through other fields.
+  const concealed = classification !== undefined && privatePolicy.mode !== 'copy';
+  const titlePolicy: TextPolicy =
+    concealed && privatePolicy.mode === 'replace' ? privatePolicy : policies.title;
+  const summary = applyPolicy(event.subject, titlePolicy)?.replace(/\s*\n\s*/g, ' ');
   let start = event.start;
   let end = event.end;
   if (event.allDay) {
@@ -59,6 +113,8 @@ export function mapEvent(event: SourceEvent, settings: Settings): MirrorEvent {
     showAs: event.showAs,
     attendees: [],
   };
+  if (classification) mapped.classification = classification;
+  if (concealed) return mapped;
   const description = applyPolicy(event.body, policies.description);
   if (description) mapped.description = description;
   const location = applyPolicy(event.location, policies.location)?.replace(/\s*\n\s*/g, ' ');
