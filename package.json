@@ -1,0 +1,25 @@
+{
+  "name": "mirrorcal-outlook",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "description": "Browser extension that mirrors an Outlook web calendar one-way into a CalDAV calendar",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "bun test",
+    "build": "bun run scripts/build.ts",
+    "build:engine": "bun run scripts/build-engine.ts",
+    "package": "bun run build && bun run scripts/package.ts",
+    "test:e2e": "bun test ./tests/e2e/extension.e2e.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/bun": "^1.4.2",
+    "@types/chrome": "^0.3.4",
+    "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2"
+  }
+}

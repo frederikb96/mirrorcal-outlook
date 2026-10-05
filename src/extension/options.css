@@ -1,0 +1,146 @@
+:root {
+  color-scheme: light dark;
+  --accent: #2b6cb0;
+  --danger: #b83232;
+  --border: #8884;
+}
+body {
+  font:
+    14px / 1.45 system-ui,
+    sans-serif;
+  margin: 0;
+}
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+}
+h1 {
+  margin-bottom: 0.2rem;
+}
+h2 {
+  margin-top: 2rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.2rem;
+}
+.lede,
+.hint {
+  opacity: 0.75;
+}
+.hint {
+  font-size: 12px;
+  margin: 0.2rem 0 0.8rem;
+}
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 1rem 0;
+  padding: 0.5rem 1rem 1rem;
+}
+label {
+  display: block;
+  margin-top: 0.7rem;
+}
+input[type="text"],
+input[type="url"],
+input[type="password"],
+input[type="number"],
+select,
+textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.35rem 0.5rem;
+  margin-top: 0.2rem;
+  font: inherit;
+}
+input[type="number"] {
+  width: 8rem;
+}
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.policy {
+  display: grid;
+  grid-template-columns: 7rem 8rem 1fr;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+.policy select,
+.policy input {
+  margin: 0;
+}
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1rem;
+  align-items: center;
+}
+.checks label {
+  margin: 0;
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+.buttons {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+button {
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+dl {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  gap: 0.2rem 1rem;
+  margin: 0.5rem 0;
+}
+dt {
+  opacity: 0.7;
+}
+dd {
+  margin: 0;
+}
+.banner {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.8rem;
+  margin: 0.8rem 0;
+}
+.banner.warn {
+  border-color: var(--danger);
+}
+.message {
+  min-height: 1.4em;
+}
+.message.error {
+  color: var(--danger);
+}
+#plan details {
+  margin: 0.4rem 0;
+}
+#plan ul {
+  max-height: 16rem;
+  overflow: auto;
+  margin: 0.3rem 0;
+  padding-left: 1.2rem;
+}

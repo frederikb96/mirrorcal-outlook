@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>MirrorCal Outlook</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>MirrorCal Outlook</h1>
+      <p class="lede">
+        Mirrors your Outlook web calendar one-way into a CalDAV calendar. Nothing is ever written to
+        Outlook. The destination calendar is overwritten; only events carrying this mirror's owner
+        marker are changed or removed.
+      </p>
+
+      <section id="status-panel">
+        <h2>Status</h2>
+        <dl id="status"></dl>
+        <div id="banner" class="banner" hidden></div>
+        <div class="buttons">
+          <button id="sync" type="button">Sync now</button>
+          <button id="preview" type="button">Preview changes</button>
+          <button id="reset" type="button" class="danger">Reset mirror</button>
+        </div>
+        <p id="action-message" class="message" role="status"></p>
+        <div id="plan" hidden></div>
+        <div id="confirm-box" class="banner warn" hidden>
+          <p id="confirm-text"></p>
+          <button id="confirm" type="button" class="danger">Confirm and apply</button>
+        </div>
+      </section>
+
+      <form id="settings" autocomplete="off">
+        <h2>Settings</h2>
+
+        <label class="switch"><input id="enabled" type="checkbox" /> Syncing enabled</label>
+
+        <fieldset>
+          <legend>Calendar server</legend>
+          <label>Calendar URL
+            <input id="caldavUrl" type="url" placeholder="https://host/remote.php/dav/calendars/user/name/" />
+          </label>
+          <label>User name <input id="username" type="text" /></label>
+          <label>App password
+            <input id="password" type="password" autocomplete="new-password" />
+          </label>
+          <p class="hint">
+            The password is stored unencrypted in this browser profile's extension storage. Use an
+            app password that can be revoked.
+          </p>
+          <label>Owner id <input id="ownerId" type="text" /></label>
+          <p class="hint">
+            Marks the events this mirror owns. Keep it identical on every browser that mirrors the
+            same calendar.
+          </p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Time span and schedule</legend>
+          <label>Days back <input id="daysBack" type="number" min="0" /></label>
+          <label>Days ahead <input id="daysAhead" type="number" min="0" /></label>
+          <label>Sync every (minutes) <input id="intervalMinutes" type="number" min="5" /></label>
+          <label>Outlook host <select id="outlookHost"></select></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>What is mirrored</legend>
+          <div class="policy" data-field="title"><span>Title</span></div>
+          <div class="policy" data-field="description"><span>Description</span></div>
+          <div class="policy" data-field="location"><span>Location</span></div>
+          <div class="policy" data-field="attendees"><span>Attendees</span></div>
+          <p class="hint">Time, all-day flag and availability are always mirrored.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Not mirrored</legend>
+          <label>Titles, one per line
+            <textarea id="titleFilters" rows="5" placeholder="Sport&#10;Mittagessen&#10;Team*"></textarea>
+          </label>
+          <p class="hint">
+            Matched against the whole title, ignoring case; <code>*</code> matches any text.
+          </p>
+          <div id="showAsBox" class="checks"><span>Availability</span></div>
+        </fieldset>
+
+        <div class="buttons">
+          <button id="save" type="submit">Save</button>
+        </div>
+        <p id="save-message" class="message" role="status"></p>
+      </form>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
