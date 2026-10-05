@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: arc-runner-mirrorcal-outlook
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Build
+        id: build
+        shell: bash
+        run: bun run build 2>&1 | tee build.log
+      - name: Build errors
+        if: failure() && steps.build.outcome == 'failure'
+        run: grep -iE 'error|failed' build.log || true
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Lint
+        run: bun run lint
+      - name: Test
+        run: bun run test
+      - name: Package
+        run: bun run package

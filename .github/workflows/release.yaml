@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: arc-runner-mirrorcal-outlook
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Build
+        run: bun run build
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Lint
+        run: bun run lint
+      - name: Test
+        run: bun run test
+      - name: Package
+        run: bun run package
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: mirrorcal-outlook.zip
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -1,0 +1,19 @@
+name: Setup
+description: Install Bun and the locked dependencies on a bare runner
+
+runs:
+  using: composite
+  steps:
+    # setup-bun fetches a zip archive; the package script writes one
+    - name: Install host prerequisites
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl ca-certificates unzip zip
+    - uses: oven-sh/setup-bun@v2
+      with:
+        # renovate: datasource=github-releases depName=oven-sh/bun
+        bun-version: 1.4.2
+    - name: Install dependencies
+      shell: bash
+      run: bun install --frozen-lockfile

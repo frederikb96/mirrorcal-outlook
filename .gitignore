@@ -1,0 +1,7 @@
+.claude/
+node_modules/
+dist/
+dist-engine/
+mirrorcal-outlook.zip
+*.log
+.DS_Store
