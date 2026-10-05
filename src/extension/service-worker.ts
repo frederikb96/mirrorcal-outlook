@@ -1,5 +1,5 @@
 import { OUTLOOK_HOSTS, TOKEN_CAPTURE_PATHS } from '../core/constants.ts';
-import { captureToken } from './capture.ts';
+import { captureToken, releaseAccount } from './capture.ts';
 import type {
   Request,
   ResetResponse,
@@ -10,7 +10,7 @@ import type {
 import { runResetFlight, runSyncFlight } from './runner.ts';
 import { saveSettingsFlow } from './save.ts';
 import { buildStatus } from './status.ts';
-import { clearAccount, loadSettings } from './storage.ts';
+import { loadSettings } from './storage.ts';
 
 const ALARM = 'mirrorcal-sync';
 
@@ -40,13 +40,13 @@ async function handle(
       return admitted.busy ? { busy: true } : { busy: false, ...admitted.value };
     }
     case 'reset': {
-      const admitted = await runResetFlight(request.mode, request.confirmedCount);
+      const admitted = await runResetFlight(request.mode, request.confirmedCount, request.ownerId);
       return admitted.busy ? { busy: true } : { busy: false, result: admitted.value };
     }
     case 'save':
       return saveSettingsFlow(request.settings);
     case 'forget-account':
-      await clearAccount();
+      await releaseAccount();
       return {};
   }
 }

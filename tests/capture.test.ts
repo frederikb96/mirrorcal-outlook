@@ -3,9 +3,17 @@ import { sha256Hex } from '../src/core/crypto.ts';
 import {
   captureToken,
   type ObservedRequest,
+  releaseAccount,
   resetCaptureMemory,
 } from '../src/extension/capture.ts';
-import { loadToken, saveAccount, saveRejectedToken, saveToken } from '../src/extension/storage.ts';
+import {
+  loadAccount,
+  loadIgnoredTokens,
+  loadToken,
+  saveAccount,
+  saveRejectedToken,
+  saveToken,
+} from '../src/extension/storage.ts';
 import { installFakeChrome } from './helpers/fake-chrome.ts';
 import { makeJwt } from './helpers/fixtures.ts';
 
@@ -57,15 +65,28 @@ describe('where a token may come from', () => {
 
 describe('which account is followed', () => {
   test('a pinned mirror ignores every other account', async () => {
-    await saveAccount({ id: 'tenant-1/a', label: 'a@example.test' });
+    await saveAccount({
+      tenant: 'tenant-1',
+      oid: 'a',
+      name: 'a@example.test',
+      label: 'a@example.test',
+    });
     expect((await captureToken(request(tokenFor('b')), NOW)).stored).toBe(false);
-    expect((await captureToken(request(makeJwt()), NOW)).stored).toBe(false);
     expect((await captureToken(request(tokenFor('a')), NOW)).stored).toBe(true);
   });
 
   test('a pinned mirror drops a stored token of another account for its own', async () => {
-    await saveToken({ token: tokenFor('b', nowSeconds + 9000), exp: nowSeconds + 9000 });
-    await saveAccount({ id: 'tenant-1/a', label: 'a@example.test' });
+    await saveToken({
+      token: tokenFor('b', nowSeconds + 9000),
+      exp: nowSeconds + 9000,
+      account: { tenant: 'tenant-1', oid: 'b', label: 'b' },
+    });
+    await saveAccount({
+      tenant: 'tenant-1',
+      oid: 'a',
+      name: 'a@example.test',
+      label: 'a@example.test',
+    });
     const own = tokenFor('a');
     expect((await captureToken(request(own), NOW)).stored).toBe(true);
     expect((await loadToken())?.token).toBe(own);
@@ -108,5 +129,77 @@ describe('replacing a usable token', () => {
     sessionWrites = 0;
     expect((await captureToken(request(jwt), NOW)).stored).toBe(false);
     expect(sessionWrites).toBe(0);
+  });
+});
+
+describe('a bound mirror that must not lock its user out', () => {
+  const pin = () =>
+    saveAccount({ tenant: 'tenant-1', oid: 'a', name: 'a@example.test', label: 'a@example.test' });
+
+  test('a token of the same user with another mix of claims is accepted', async () => {
+    await pin();
+    const nameOnly = makeJwt({ tid: 'tenant-1', upn: 'a@example.test', exp: nowSeconds + 3600 });
+    expect((await captureToken(request(nameOnly), NOW)).stored).toBe(true);
+  });
+
+  test('a changed object id with the same name is still the same user', async () => {
+    await pin();
+    const moved = makeJwt({
+      tid: 'tenant-1',
+      oid: 'new',
+      upn: 'a@example.test',
+      exp: nowSeconds + 3600,
+    });
+    expect((await captureToken(request(moved), NOW)).stored).toBe(true);
+  });
+
+  test('a token that carries nothing comparable is accepted', async () => {
+    await pin();
+    expect((await captureToken(request(makeJwt({ exp: nowSeconds + 3600 })), NOW)).stored).toBe(
+      true,
+    );
+  });
+
+  test('another tenant is ignored and counted once per distinct sign-in', async () => {
+    await pin();
+    const other = makeJwt({ tid: 'tenant-2', oid: 'a', exp: nowSeconds + 3600 });
+    await captureToken(request(other), NOW);
+    await captureToken(request(other), NOW);
+    expect(await loadIgnoredTokens()).toBe(1);
+    await captureToken(
+      request(makeJwt({ tid: 'tenant-3', oid: 'a', exp: nowSeconds + 3600 })),
+      NOW,
+    );
+    expect(await loadIgnoredTokens()).toBe(2);
+  });
+});
+
+describe('releasing the account', () => {
+  test('drops the binding and the stored session, so the next token decides', async () => {
+    await saveAccount({ tenant: 'tenant-1', oid: 'a', name: 'a@example.test', label: 'a' });
+    const old = tokenFor('a', nowSeconds + 3600);
+    await captureToken(request(old), NOW);
+    const switched = tokenFor('b', nowSeconds + 3600);
+    await captureToken(request(switched), NOW);
+    expect(await loadIgnoredTokens()).toBe(1);
+
+    await releaseAccount();
+    expect(await loadAccount()).toBeUndefined();
+    expect(await loadToken()).toBeNull();
+    expect(await loadIgnoredTokens()).toBe(0);
+    // The sign-in that was ignored while bound is looked at again.
+    expect((await captureToken(request(switched), NOW)).stored).toBe(true);
+    expect((await loadToken())?.token).toBe(switched);
+  });
+});
+
+describe('a token that is not taken is not remembered as seen', () => {
+  test('a not-newer token is taken when the stored one has run out', async () => {
+    const a = tokenFor('a', nowSeconds + 120);
+    const b = tokenFor('a', nowSeconds + 200);
+    await captureToken(request(a), NOW);
+    expect((await captureToken(request(b), NOW)).stored).toBe(false);
+    const later = NOW + 100_000;
+    expect((await captureToken(request(b), later)).stored).toBe(true);
   });
 });

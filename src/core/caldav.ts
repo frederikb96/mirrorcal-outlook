@@ -25,6 +25,12 @@ export class CalDavError extends Error {
   }
 }
 
+/** The kind of a failure for comparing runs: the error code with the HTTP status, if any. */
+export function failureCode(error: unknown): string {
+  if (!(error instanceof CalDavError)) return 'error';
+  return error.status === undefined ? error.code : `${error.code}:${error.status}`;
+}
+
 function authorization(target: CalDavTarget): string {
   const bytes = new TextEncoder().encode(`${target.username}:${target.password}`);
   let binary = '';

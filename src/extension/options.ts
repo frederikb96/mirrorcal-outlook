@@ -21,7 +21,7 @@ import type {
   StatusResponse,
   SyncResponse,
 } from './messages.ts';
-import { buildStatus } from './status.ts';
+import { buildStatus, ignoredTokensNote } from './status.ts';
 import { loadSettings } from './storage.ts';
 
 const OUTCOME_LABEL: Record<string, string> = {
@@ -217,10 +217,10 @@ async function save() {
     setMessage(errors.join('. '), 'error', 'save-message');
     return;
   }
+  const origins = [originPattern(draft.caldavUrl) as string];
+  const alreadyHeld = await chrome.permissions.contains({ origins });
   // Requested first: the browser only grants it inside the click's user gesture.
-  const granted = await chrome.permissions.request({
-    origins: [originPattern(draft.caldavUrl) as string],
-  });
+  const granted = await chrome.permissions.request({ origins });
   if (!granted) {
     setMessage(
       'Access to the calendar server was not granted, nothing saved',
@@ -232,6 +232,8 @@ async function save() {
   setMessage('Checking the calendar and saving…', 'info', 'save-message');
   const response = await send<SaveResponse>({ type: 'save', settings: draft });
   if (!response.saved) {
+    // A refused save does not keep the access it asked for.
+    if (!alreadyHeld) await chrome.permissions.remove({ origins });
     setMessage(
       `Nothing saved: ${(response.errors ?? ['unknown error']).join('. ')}`,
       'error',
@@ -296,6 +298,7 @@ function renderStatus(status: StatusResponse) {
       ? `${status.account.label}${status.account.pinned ? '' : ' (bound after the first successful sync)'}`
       : 'not seen yet: open Outlook in this browser',
   );
+  if (status.ignoredTokens > 0) addRow(list, 'Ignored', ignoredTokensNote(status.ignoredTokens));
   addRow(
     list,
     'Outlook session',
@@ -428,7 +431,7 @@ function showConfirm(record: RunRecord | undefined) {
 
 // ---- actions --------------------------------------------------------------------------------
 
-const BUTTONS = ['sync', 'preview', 'reset', 'confirm', 'save', 'forget'];
+const BUTTONS = ['sync', 'preview', 'reset', 'reset-other', 'confirm', 'save', 'forget'];
 
 async function busyWhile(work: () => Promise<void>) {
   for (const id of BUTTONS) el<HTMLButtonElement>(id).disabled = true;
@@ -504,34 +507,76 @@ async function onConfirm() {
 async function onForgetAccount() {
   await busyWhile(async () => {
     await send({ type: 'forget-account' });
-    setMessage('The next sync binds the mirror to the account of the open Outlook session.');
+    setMessage('Released. The next Outlook session the page shows is mirrored.');
   });
 }
 
+/** Counts, asks, then deletes the events of one owner id (the configured one when omitted). */
+async function resetOwner(
+  ownerId: string | undefined,
+  question: (own: number, foreign: number) => string,
+) {
+  const owner = ownerId === undefined ? {} : { ownerId };
+  const counted = await send<ResetResponse>({ type: 'reset', mode: 'count', ...owner });
+  const result = counted.result;
+  if (counted.busy || !result || result.outcome !== 'counted') {
+    setMessage(result?.message ?? 'A sync is already running. Try again in a moment.', 'error');
+    return;
+  }
+  if (result.own === 0 || !window.confirm(question(result.own, result.foreign))) {
+    setMessage(result.own === 0 ? 'Nothing to delete.' : 'Cancelled.');
+    return;
+  }
+  const done = await send<ResetResponse>({
+    type: 'reset',
+    mode: 'apply',
+    confirmedCount: result.own,
+    ...owner,
+  });
+  const r = done.result;
+  setMessage(
+    r
+      ? `${r.outcome}: deleted ${r.deleted}${r.errors.length ? `, ${r.errors.length} failed` : ''}${r.message ? ` (${r.message})` : ''}`
+      : 'Busy',
+    r?.outcome === 'reset' ? 'info' : 'error',
+  );
+}
+
 async function onReset() {
+  await busyWhile(() =>
+    resetOwner(
+      undefined,
+      (own, foreign) =>
+        `Delete all ${own} mirrored events from the calendar? ${foreign} other objects are left alone. While syncing is on, the next run recreates the mirror (and asks for confirmation if other objects remain): switch syncing off first to stop mirroring.`,
+    ),
+  );
+}
+
+async function onResetOther() {
   await busyWhile(async () => {
-    const counted = await send<ResetResponse>({ type: 'reset', mode: 'count' });
-    const result = counted.result;
-    if (counted.busy || !result || result.outcome !== 'counted') {
-      setMessage(result?.message ?? 'A sync is already running. Try again in a moment.', 'error');
+    const overview = await send<ResetResponse>({ type: 'reset', mode: 'count' });
+    if (overview.busy || !overview.result) {
+      setMessage('A sync is already running. Try again in a moment.', 'error');
       return;
     }
-    const question = `Delete all ${result.own} mirrored events from the calendar? ${result.foreign} other objects are left alone. While syncing is on, the next run recreates the mirror: switch syncing off first to stop mirroring.`;
-    if (result.own === 0 || !window.confirm(question)) {
-      setMessage(result.own === 0 ? 'Nothing to delete.' : 'Cancelled.');
+    const owners = overview.result.otherOwners;
+    if (owners.length === 0) {
+      setMessage('No events of another owner id found.');
       return;
     }
-    const done = await send<ResetResponse>({
-      type: 'reset',
-      mode: 'apply',
-      confirmedCount: result.own,
-    });
-    const r = done.result;
-    setMessage(
-      r
-        ? `${r.outcome}: deleted ${r.deleted}${r.errors.length ? `, ${r.errors.length} failed` : ''}${r.message ? ` (${r.message})` : ''}`
-        : 'Busy',
-      r?.outcome === 'reset' ? 'info' : 'error',
+    const listing = owners.map((o) => `${o.id} (${o.count})`).join(', ');
+    const chosen =
+      owners.length === 1
+        ? owners[0]?.id
+        : window.prompt(`Remove the events of which owner id? ${listing}`, owners[0]?.id)?.trim();
+    if (!chosen || !owners.some((o) => o.id === chosen)) {
+      setMessage('Cancelled.');
+      return;
+    }
+    await resetOwner(
+      chosen,
+      (own) =>
+        `Delete the ${own} events of owner id ${chosen}? Objects without any mirror owner id, and those of other owner ids, are left alone.`,
     );
   });
 }
@@ -560,6 +605,7 @@ async function init() {
   el('confirm').addEventListener('click', () => void onConfirm());
   el('reset').addEventListener('click', () => void onReset());
   el('forget').addEventListener('click', () => void onForgetAccount());
+  el('reset-other').addEventListener('click', () => void onResetOther());
   await refreshStatus();
   watchStorage();
 }

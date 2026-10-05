@@ -45,7 +45,7 @@ export function evaluateGuards(input: GuardInput): GuardVerdict {
     return {
       ok: false,
       code: 'other-owner',
-      message: `The calendar holds events of another mirror owner id (${ids}); creating events would duplicate them. Reset that mirror first or use its owner id`,
+      message: `The calendar holds events of another mirror owner id (${ids}); creating events would duplicate them. Remove them with the settings page's "another owner" reset, or confirm to create the events next to them`,
     };
   }
   if (creations > 0 && ownCount === 0 && foreignCount > 0) {

@@ -12,6 +12,8 @@ const ACCOUNT_KEY = 'account';
 const REJECTED_PASSWORD_KEY = 'credentialsRejected';
 const BACKOFF_KEY = 'backoff';
 const REJECTED_TOKEN_KEY = 'rejectedToken';
+const IGNORED_TOKENS_KEY = 'ignoredTokens';
+const OWNERS_KEY = 'acknowledgedOwners';
 const LOG_LIMIT = 50;
 
 /** Identical failures in a row, and when scheduled runs may try again. */
@@ -65,6 +67,17 @@ export async function savePasswordRejected(rejected: boolean): Promise<void> {
   else await chrome.storage.local.remove(REJECTED_PASSWORD_KEY);
 }
 
+/** Other mirrors' owner ids whose events the user confirmed to share the calendar with. */
+export async function loadAcknowledgedOwners(): Promise<string[]> {
+  const items = await chrome.storage.local.get(OWNERS_KEY);
+  return (items[OWNERS_KEY] as string[] | undefined) ?? [];
+}
+
+export async function addAcknowledgedOwners(owners: string[]): Promise<void> {
+  const merged = [...new Set([...(await loadAcknowledgedOwners()), ...owners])];
+  await chrome.storage.local.set({ [OWNERS_KEY]: merged });
+}
+
 export async function loadBackoff(): Promise<Backoff | undefined> {
   const items = await chrome.storage.local.get(BACKOFF_KEY);
   return items[BACKOFF_KEY] as Backoff | undefined;
@@ -95,6 +108,20 @@ export async function loadRejectedToken(): Promise<string | undefined> {
   return items[REJECTED_TOKEN_KEY] as string | undefined;
 }
 
+/** How many different sign-ins of another account were ignored since the binding was last released. */
+export async function loadIgnoredTokens(): Promise<number> {
+  const items = await chrome.storage.session.get(IGNORED_TOKENS_KEY);
+  return (items[IGNORED_TOKENS_KEY] as number | undefined) ?? 0;
+}
+
+export async function countIgnoredToken(): Promise<void> {
+  await chrome.storage.session.set({ [IGNORED_TOKENS_KEY]: (await loadIgnoredTokens()) + 1 });
+}
+
+export async function clearIgnoredTokens(): Promise<void> {
+  await chrome.storage.session.remove(IGNORED_TOKENS_KEY);
+}
+
 export async function saveRejectedToken(fingerprint: string): Promise<void> {
   await chrome.storage.session.set({ [REJECTED_TOKEN_KEY]: fingerprint });
 }
@@ -110,7 +137,7 @@ function sameOutcome(a: RunRecord, b: RunRecord): boolean {
   return (
     a.kind === b.kind &&
     a.outcome === b.outcome &&
-    a.message === b.message &&
+    (a.failure ?? a.message) === (b.failure ?? b.message) &&
     a.digest === b.digest &&
     (a.counts?.errors ?? 0) === (b.counts?.errors ?? 0)
   );

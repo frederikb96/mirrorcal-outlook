@@ -24,6 +24,8 @@ export interface RunRecord {
   finishedAt: string;
   outcome: RunOutcome;
   message?: string;
+  /** Kind of failure (error code and HTTP status): runs are repeats of each other by this, not by wording. */
+  failure?: string;
   counts?: SyncCounts;
   guard?: { code: string; message: string };
   digest?: string;
@@ -34,7 +36,7 @@ export interface RunRecord {
 export type Request =
   | { type: 'status' }
   | { type: 'sync'; mode: 'apply' | 'preview'; confirm?: { digest: string } }
-  | { type: 'reset'; mode: 'count' | 'apply'; confirmedCount?: number }
+  | { type: 'reset'; mode: 'count' | 'apply'; confirmedCount?: number; ownerId?: string }
   | { type: 'save'; settings: Settings }
   | { type: 'forget-account' };
 
@@ -44,6 +46,8 @@ export interface StatusResponse {
   token: { present: boolean; usable: boolean; expiresAt?: string };
   /** The account being mirrored; `pinned` once a sync has succeeded for it. */
   account?: { label: string; pinned: boolean };
+  /** Sign-ins of another account that were ignored because the mirror is bound to one account. */
+  ignoredTokens: number;
   /** The calendar server rejected the password and nothing is retried until settings are saved. */
   passwordRejected: boolean;
   /** ISO time before which scheduled runs do not retry a repeating failure. */

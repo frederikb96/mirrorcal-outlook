@@ -13,7 +13,7 @@ function isRepeatableFailure(record: RunRecord): boolean {
 }
 
 const signatureOf = (record: RunRecord) =>
-  [record.outcome, record.counts?.errors ?? 0, record.message ?? '', record.digest ?? ''].join('|');
+  [record.outcome, record.failure ?? record.message ?? '', record.digest ?? ''].join('|');
 
 /**
  * Tracks identical failures in a row. After a few, scheduled runs wait an hour (or the sync

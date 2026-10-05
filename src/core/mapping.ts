@@ -13,9 +13,11 @@ import type {
 
 export type TitleMatcher = (title: string) => boolean;
 
-const codePoints = (text: string) => Array.from(text.toLowerCase());
+/** Case-folds one code point at a time, so context-sensitive forms (final sigma) fold like the rest. */
+const foldCodePoint = (char: string) => (char === 'ς' ? 'σ' : char.toLowerCase());
+const codePoints = (text: string) => Array.from(text, foldCodePoint);
 
-/** Glob match, `*` being the only wildcard. Linear scan that backtracks to the last `*` only. */
+/** Glob match, `*` being the only wildcard. Backtracks to the last `*` only, so the work is bounded by title length times pattern length. */
 function globMatches(pattern: string[], text: string[]): boolean {
   let p = 0;
   let t = 0;

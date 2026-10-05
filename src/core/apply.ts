@@ -2,6 +2,7 @@ import {
   CalDavError,
   type CalDavTarget,
   deleteObject,
+  failureCode,
   putObject,
   resolveInCollection,
 } from './caldav.ts';
@@ -13,6 +14,8 @@ export interface OpError {
   op: 'create' | 'update' | 'delete';
   uid: string;
   message: string;
+  /** What kind of failure it was, independent of its wording: the error code plus HTTP status. */
+  code: string;
 }
 
 export interface ApplyResult {
@@ -64,7 +67,7 @@ export async function applyPlan(plan: Plan, ctx: ApplyContext): Promise<ApplyRes
       await run();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error';
-      result.errors.push({ op, uid, message });
+      result.errors.push({ op, uid, message, code: failureCode(error) });
       if (error instanceof CalDavError && error.code === 'auth') result.stopped = message;
     }
   };

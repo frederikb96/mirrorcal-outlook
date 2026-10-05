@@ -143,3 +143,17 @@ describe('private events policy', () => {
     expect(validateSettings(bad)).toHaveLength(1);
   });
 });
+
+describe('Outlook host spellings', () => {
+  test('a trailing dot or an encoded dot is still the Outlook host', () => {
+    for (const url of [
+      'https://outlook.office.com./x/',
+      'https://outlook.office.com%2e/x/',
+      'https://OUTLOOK.office.com/x/',
+    ]) {
+      expect(validateDestination(testSettings({ caldavUrl: url }))).toContain(
+        'Calendar URL must not point at Outlook',
+      );
+    }
+  });
+});

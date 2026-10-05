@@ -31,8 +31,13 @@ import {
   planDigest,
   planSync,
 } from './plan.ts';
-import { normalizeCaldavUrl, validateDestination, validateSettings } from './settings.ts';
-import { normalizeToken, type TokenAccount, tokenAccount } from './token.ts';
+import {
+  normalizeCaldavUrl,
+  OWNER_ID_PATTERN,
+  validateDestination,
+  validateSettings,
+} from './settings.ts';
+import { matchAccount, normalizeToken, type TokenAccount, tokenAccount } from './token.ts';
 import type { FetchLike, Settings } from './types.ts';
 
 export type Outcome =
@@ -51,10 +56,16 @@ export interface RunOptions {
   /** Outlook bearer token, bare or as a full `Bearer …` header value. */
   token: string;
   /**
-   * Id of the account this mirror is bound to (`SyncResult.account.id` of an earlier run). A token
-   * issued to anyone else is refused before anything is read.
+   * The account this mirror is bound to (`SyncResult.account` of an earlier run). A token that is
+   * provably issued to anyone else is refused before anything is read; one that carries nothing
+   * comparable is let through.
    */
-  expectedAccount?: string;
+  expectedAccount?: TokenAccount;
+  /**
+   * Owner ids of other mirrors whose events the user already confirmed to share the calendar
+   * with; they no longer hold back creations.
+   */
+  acknowledgedOwners?: string[];
   settings: Settings;
   now: Date;
   /** `preview` plans without writing anything. */
@@ -123,7 +134,13 @@ export interface SyncCounts {
 export interface SyncResult {
   outcome: Outcome;
   message?: string;
-  error?: { source: 'outlook' | 'caldav' | 'settings' | 'engine'; code: string; message: string };
+  error?: {
+    source: 'outlook' | 'caldav' | 'settings' | 'engine';
+    code: string;
+    message: string;
+    /** HTTP status, for failures that came with one. */
+    status?: number;
+  };
   window?: { start: string; end: string };
   counts: SyncCounts;
   plan?: PlanView;
@@ -133,6 +150,8 @@ export interface SyncResult {
   digest?: string;
   /** Whom the Outlook token was issued to, when it says; set once Outlook has been read. */
   account?: TokenAccount;
+  /** Present after a confirmed plan that shares the calendar with other mirrors' events. */
+  acknowledgedOwners?: string[];
   /** True when the destination was found unchanged and not read. */
   skipped?: boolean;
   /** Present after a quiet, error-free apply run: pass it back as `lastState`. */
@@ -209,8 +228,10 @@ function fail(
   code: string,
   message: string,
   counts = emptyCounts(),
+  status?: number,
 ): SyncResult {
-  return { outcome, message, error: { source, code, message }, counts, errors: [] };
+  const error = { source, code, message, ...(status === undefined ? {} : { status }) };
+  return { outcome, message, error, counts, errors: [] };
 }
 
 /** Compares a fresh Outlook read with a fresh destination read and, in apply mode, writes the difference. */
@@ -235,7 +256,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     return fail('auth-failed', 'outlook', 'no-token', 'No usable Outlook token');
   }
   const account = tokenAccount(token);
-  if (options.expectedAccount !== undefined && account?.id !== options.expectedAccount) {
+  if (options.expectedAccount && matchAccount(options.expectedAccount, account) === 'mismatch') {
     return fail(
       'auth-failed',
       'outlook',
@@ -290,7 +311,14 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
       } catch (error) {
         if (error instanceof CalDavError) {
           return {
-            ...fail('destination-failed', 'caldav', error.code, error.message, counts),
+            ...fail(
+              'destination-failed',
+              'caldav',
+              error.code,
+              error.message,
+              counts,
+              error.status,
+            ),
             window,
             ...accountField,
           };
@@ -321,7 +349,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     } catch (error) {
       if (error instanceof CalDavError) {
         return {
-          ...fail('destination-failed', 'caldav', error.code, error.message, counts),
+          ...fail('destination-failed', 'caldav', error.code, error.message, counts, error.status),
           window,
           ...accountField,
         };
@@ -340,13 +368,14 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     counts.conflicts = plan.conflicts.length;
 
     const digest = await planDigest(plan);
+    const acknowledged = new Set(options.acknowledgedOwners);
     const verdict = evaluateGuards({
       sourceCount: read.rawCount,
       deletions: plan.deletions.length,
       ownCount: plan.ownCount,
       creations: plan.creations.length,
       foreignCount: plan.foreign.length,
-      otherOwners: otherOwnersOf(plan.foreign),
+      otherOwners: otherOwnersOf(plan.foreign).filter((id) => !acknowledged.has(id)),
     });
     const result: SyncResult = {
       outcome: 'preview',
@@ -372,6 +401,9 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
       return result;
     }
 
+    if (!verdict.ok && verdict.code === 'other-owner') {
+      result.acknowledgedOwners = otherOwnersOf(plan.foreign);
+    }
     const ownedUrls = new Set(plan.ownHrefs);
     const applied = await applyPlan(plan, { fetch: options.fetch, target, ownedUrls });
     counts.created = applied.created;
@@ -392,7 +424,7 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     const first = applied.errors[0];
     if (applied.stopped) {
       result.message = applied.stopped;
-      result.error = { source: 'caldav', code: 'auth', message: applied.stopped };
+      result.error = { source: 'caldav', code: 'auth', message: applied.stopped, status: 401 };
     } else if (first) {
       result.message = first.message;
     }
@@ -449,35 +481,58 @@ export interface ResetOptions {
   mode: 'count' | 'apply';
   /** Required for `apply`: the count the user was shown. A different current count refuses the reset. */
   confirmedCount?: number;
+  /**
+   * Whose events to count and delete: the configured owner id by default, or the id of another
+   * mirror. Only objects carrying exactly that owner marker are ever listed for deletion.
+   */
+  ownerId?: string;
 }
 
 export interface ResetResult {
   outcome: 'counted' | 'reset' | 'refused' | 'invalid-settings' | 'destination-failed' | 'failed';
   message?: string;
+  /** Objects carrying the owner marker that was asked about. */
   own: number;
   foreign: number;
+  /** Other mirrors' owner ids found among the foreign objects, with their object counts. */
+  otherOwners: { id: string; count: number }[];
   deleted: number;
   errors: OpError[];
 }
 
-/** Deletes every object carrying the owner marker, and nothing else. */
+/** Deletes every object carrying the chosen owner marker, and nothing else. */
 export async function resetMirror(options: ResetOptions): Promise<ResetResult> {
-  const result: ResetResult = { outcome: 'counted', own: 0, foreign: 0, deleted: 0, errors: [] };
+  const result: ResetResult = {
+    outcome: 'counted',
+    own: 0,
+    foreign: 0,
+    otherOwners: [],
+    deleted: 0,
+    errors: [],
+  };
   const problems = validateDestination(options.settings);
+  const ownerId = options.ownerId ?? options.settings.ownerId;
+  if (!OWNER_ID_PATTERN.test(ownerId)) problems.push('Owner id is not valid');
   if (problems.length > 0)
     return { ...result, outcome: 'invalid-settings', message: problems.join('; ') };
   const target = destinationTarget(options.settings);
   try {
     const listing = await listObjects(options.fetch, target);
-    const { own, foreign } = await classifyRemote(listing.objects, options.settings.ownerId);
+    const { own, foreign } = await classifyRemote(listing.objects, ownerId);
     result.own = own.length;
     result.foreign = foreign.length;
+    for (const object of foreign) {
+      if (!object.owner) continue;
+      const entry = result.otherOwners.find((o) => o.id === object.owner);
+      if (entry) entry.count += 1;
+      else result.otherOwners.push({ id: object.owner, count: 1 });
+    }
     if (options.mode === 'count') return result;
     if (options.confirmedCount !== own.length) {
       return {
         ...result,
         outcome: 'refused',
-        message: `The calendar now holds ${own.length} mirrored events, not ${options.confirmedCount ?? 'the confirmed number'}`,
+        message: `The calendar now holds ${own.length} events of this owner id, not ${options.confirmedCount ?? 'the confirmed number'}`,
       };
     }
     const plan: Plan = {

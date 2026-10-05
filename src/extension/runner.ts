@@ -11,13 +11,17 @@ import { originPattern, validateDestination } from '../core/settings.ts';
 import { isTokenUsable } from '../core/token.ts';
 import { showAttention } from './attention.ts';
 import { nextBackoff } from './backoff.ts';
+import { releaseAccount } from './capture.ts';
 import type { RunOutcome, RunRecord, Trigger } from './messages.ts';
 import { type Admission, createSingleFlight } from './single-flight.ts';
+import { ignoredTokensNote } from './status.ts';
 import {
-  clearAccount,
+  addAcknowledgedOwners,
   clearToken,
   loadAccount,
+  loadAcknowledgedOwners,
   loadBackoff,
+  loadIgnoredTokens,
   loadPasswordRejected,
   loadSettings,
   loadSyncState,
@@ -86,6 +90,10 @@ function recordFromResult(trigger: Trigger, startedAt: Date, result: SyncResult)
   });
   const message = rejected ? PASSWORD_REJECTED_MESSAGE : (result.message ?? result.error?.message);
   if (message) record.message = message;
+  const failure = result.error
+    ? `${result.error.code}${result.error.status === undefined ? '' : `:${result.error.status}`}`
+    : result.errors[0]?.code;
+  if (failure) record.failure = failure;
   if (result.guard) record.guard = { code: result.guard.code, message: result.guard.message };
   if (result.digest && (result.outcome === 'needs-confirmation' || result.outcome === 'preview')) {
     record.digest = result.digest;
@@ -128,9 +136,12 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
   }
   const token = await loadToken();
   if (!isTokenUsable(token, Date.now())) {
+    const ignored = await loadIgnoredTokens();
     return finish(
       recordOf(request.trigger, startedAt, 'no-token', {
-        message: 'No valid Outlook session seen: open Outlook in this browser',
+        message: `No valid Outlook session seen: open Outlook in this browser${
+          ignored > 0 ? `. ${ignoredTokensNote(ignored)}` : ''
+        }`,
       }),
     );
   }
@@ -148,7 +159,8 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
   const result = await runSync({
     fetch: doFetch,
     token: (token as { token: string }).token,
-    ...(pinned ? { expectedAccount: pinned.id } : {}),
+    ...(pinned ? { expectedAccount: pinned } : {}),
+    acknowledgedOwners: await loadAcknowledgedOwners(),
     settings,
     now: new Date(),
     mode: request.mode,
@@ -168,6 +180,9 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
     else if (result.outcome === 'applied') await savePasswordRejected(false);
     if (result.outcome === 'applied' && result.account && !pinned)
       await saveAccount(result.account);
+    if (result.outcome === 'applied' && result.acknowledgedOwners) {
+      await addAcknowledgedOwners(result.acknowledgedOwners);
+    }
     await saveBackoff(
       nextBackoff(await loadBackoff(), record, Date.now(), settings.intervalMinutes),
     );
@@ -203,6 +218,7 @@ export async function runSyncFlight(request: SyncRequest): Promise<Admission<Syn
 export async function runResetFlight(
   mode: 'count' | 'apply',
   confirmedCount?: number,
+  ownerId?: string,
 ): Promise<Admission<ResetResult>> {
   const admitted = await flight.run(() =>
     keepAliveWhile(async () => {
@@ -213,9 +229,11 @@ export async function runResetFlight(
         settings,
         mode,
         ...(confirmedCount === undefined ? {} : { confirmedCount }),
+        ...(ownerId === undefined ? {} : { ownerId }),
       });
       if (mode === 'apply' && result.outcome === 'reset') {
-        await clearAccount();
+        const other = ownerId !== undefined && ownerId !== settings.ownerId;
+        if (!other) await releaseAccount();
         await showAttention(
           await recordRun({
             kind: 'reset',
@@ -223,7 +241,9 @@ export async function runResetFlight(
             startedAt: startedAt.toISOString(),
             finishedAt: new Date().toISOString(),
             outcome: 'reset',
-            message: `Deleted ${result.deleted} mirrored events`,
+            message: other
+              ? `Deleted ${result.deleted} events of owner id ${ownerId}`
+              : `Deleted ${result.deleted} mirrored events`,
             repeats: 1,
           }),
         );

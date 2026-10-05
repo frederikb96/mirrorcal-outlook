@@ -142,3 +142,14 @@ describe('the stored password and another server', () => {
     expect(fake.state.removedOrigins).toEqual([]);
   });
 });
+
+describe('a server that answers with an error', () => {
+  test('does not block saving: only "not a calendar" and a rejected password do', async () => {
+    dav.failWhen = (method) => (method === 'PROPFIND' ? 503 : undefined);
+    const response = await saveSettingsFlow(testSettings({ enabled: false }));
+    expect(response.saved).toBe(true);
+    expect(response.connection).toContain('could not be checked');
+    expect(response.connection).toContain('503');
+    expect((await loadSettings()).settings.enabled).toBe(false);
+  });
+});

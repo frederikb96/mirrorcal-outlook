@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import {
   isOutlookInitiator,
   isTokenUsable,
+  matchAccount,
   normalizeToken,
   parseAuthorizationHeader,
+  type TokenAccount,
   tokenAccount,
 } from '../src/core/token.ts';
 import { makeJwt } from './helpers/fixtures.ts';
@@ -53,15 +55,18 @@ describe('token account', () => {
   test('is read from tenant and user claims', () => {
     const jwt = makeJwt({ tid: 't1', oid: 'o1', upn: 'a@example.test' });
     expect(parseAuthorizationHeader(`Bearer ${jwt}`)?.account).toEqual({
-      id: 't1/o1',
+      tenant: 't1',
+      oid: 'o1',
+      name: 'a@example.test',
       label: 'a@example.test',
     });
-    expect(tokenAccount(jwt)?.id).toBe('t1/o1');
+    expect(tokenAccount(jwt)?.tenant).toBe('t1');
   });
 
   test('falls back to the user name when there is no object id, and to nothing without a tenant', () => {
     expect(tokenAccount(makeJwt({ tid: 't1', unique_name: 'a@example.test' }))).toEqual({
-      id: 't1/a@example.test',
+      tenant: 't1',
+      name: 'a@example.test',
       label: 'a@example.test',
     });
     expect(tokenAccount(makeJwt({ oid: 'o1' }))).toBeUndefined();
@@ -75,5 +80,31 @@ describe('token account', () => {
     expect(isOutlookInitiator('https://evil.test')).toBe(false);
     expect(isOutlookInitiator('chrome-extension://abc')).toBe(false);
     expect(isOutlookInitiator(undefined)).toBe(false);
+  });
+});
+
+describe('matching accounts', () => {
+  const bound: TokenAccount = { tenant: 't1', oid: 'o1', name: 'a@example.test', label: 'a' };
+
+  test('one matching claim within the tenant is enough', () => {
+    expect(matchAccount(bound, { tenant: 't1', oid: 'o1', label: '' })).toBe('match');
+    expect(matchAccount(bound, { tenant: 't1', name: 'A@Example.test', label: '' })).toBe('match');
+    expect(
+      matchAccount(bound, { tenant: 't1', oid: 'other', name: 'a@example.test', label: '' }),
+    ).toBe('match');
+  });
+
+  test('another tenant or only differing claims is a mismatch', () => {
+    expect(matchAccount(bound, { tenant: 't2', oid: 'o1', label: '' })).toBe('mismatch');
+    expect(
+      matchAccount(bound, { tenant: 't1', oid: 'o2', name: 'b@example.test', label: '' }),
+    ).toBe('mismatch');
+  });
+
+  test('nothing comparable is not a mismatch', () => {
+    expect(matchAccount(bound, undefined)).toBe('unknown');
+    expect(
+      matchAccount({ tenant: 't1', oid: 'o1', label: '' }, { tenant: 't1', name: 'x', label: '' }),
+    ).toBe('unknown');
   });
 });

@@ -1,9 +1,39 @@
 import { OUTLOOK_HOSTS, OUTLOOK_TOKEN_AUDIENCE } from './constants.ts';
 
-/** Who a token was issued to: a stable key for comparison and a readable name for display. */
+/**
+ * Who a token was issued to. The tenant is always present, next to the user's object id and/or
+ * name claim; tokens of one user do not always carry the same mix of claims.
+ */
 export interface TokenAccount {
-  id: string;
+  tenant: string;
+  oid?: string;
+  name?: string;
+  /** What is shown to the user. */
   label: string;
+}
+
+/** `unknown` when the two carry no claim that can be compared. */
+export type AccountMatch = 'match' | 'mismatch' | 'unknown';
+
+/**
+ * Compares a token's account with the one the mirror is bound to. Within one tenant a matching
+ * object id or a matching name is enough; a candidate that cannot be compared is not a mismatch.
+ */
+export function matchAccount(
+  bound: TokenAccount,
+  candidate: TokenAccount | undefined,
+): AccountMatch {
+  if (!candidate) return 'unknown';
+  if (candidate.tenant !== bound.tenant) return 'mismatch';
+  let differs = false;
+  for (const claim of ['oid', 'name'] as const) {
+    const a = bound[claim]?.toLowerCase();
+    const b = candidate[claim]?.toLowerCase();
+    if (a === undefined || b === undefined) continue;
+    if (a === b) return 'match';
+    differs = true;
+  }
+  return differs ? 'mismatch' : 'unknown';
 }
 
 export interface CapturedToken {
@@ -48,9 +78,14 @@ function accountOf(payload: Record<string, unknown>): TokenAccount | undefined {
     claim(payload, 'unique_name') ??
     claim(payload, 'preferred_username') ??
     claim(payload, 'email');
-  const user = claim(payload, 'oid') ?? name;
-  if (!tenant || !user) return undefined;
-  return { id: `${tenant}/${user}`, label: name ?? user };
+  const oid = claim(payload, 'oid');
+  if (!tenant || (!oid && !name)) return undefined;
+  return {
+    tenant,
+    ...(oid ? { oid } : {}),
+    ...(name ? { name } : {}),
+    label: (name ?? oid) as string,
+  };
 }
 
 /** The tenant and user a token was issued to, or undefined when it does not say. */

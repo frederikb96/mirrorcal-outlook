@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import { checkDestination, type RunOptions, runSync } from '../src/core/engine.ts';
+import { checkDestination, type RunOptions, resetMirror, runSync } from '../src/core/engine.ts';
 import { unfoldLines } from '../src/core/ics.ts';
 import type { Settings } from '../src/core/types.ts';
 import { FakeCalDav, routeFetch } from './helpers/fake-caldav.ts';
@@ -121,6 +121,12 @@ describe('write failures', () => {
 });
 
 describe('account binding', () => {
+  const BOUND = {
+    tenant: 'tenant-1',
+    oid: 'user-a',
+    name: 'user-a@example.test',
+    label: 'user-a@example.test',
+  };
   const tokenFor = (oid: string, tid = 'tenant-1') =>
     makeJwt({ oid, tid, upn: `${oid}@example.test` });
 
@@ -128,14 +134,19 @@ describe('account binding', () => {
     const token = tokenFor('user-a');
     outlook.expectedToken = token;
     const result = await run({ token });
-    expect(result.account).toEqual({ id: 'tenant-1/user-a', label: 'user-a@example.test' });
+    expect(result.account).toEqual({
+      tenant: 'tenant-1',
+      oid: 'user-a',
+      name: 'user-a@example.test',
+      label: 'user-a@example.test',
+    });
   });
 
   test('a token of anyone else is refused before anything is read', async () => {
-    for (const token of [tokenFor('user-b'), tokenFor('user-a', 'tenant-2'), TOKEN]) {
+    for (const token of [tokenFor('user-b'), tokenFor('user-a', 'tenant-2')]) {
       outlook.expectedToken = token;
       outlook.requests.length = 0;
-      const result = await run({ token, expectedAccount: 'tenant-1/user-a' });
+      const result = await run({ token, expectedAccount: BOUND });
       expect(result.outcome).toBe('auth-failed');
       expect(result.error?.code).toBe('wrong-account');
       expect(outlook.requests).toHaveLength(0);
@@ -143,10 +154,15 @@ describe('account binding', () => {
     }
   });
 
+  test('a token that carries nothing comparable is let through', async () => {
+    const result = await run({ token: TOKEN, expectedAccount: BOUND });
+    expect(result.outcome).toBe('applied');
+  });
+
   test('the bound account passes', async () => {
     const token = tokenFor('user-a');
     outlook.expectedToken = token;
-    const result = await run({ token, expectedAccount: 'tenant-1/user-a' });
+    const result = await run({ token, expectedAccount: BOUND });
     expect(result.outcome).toBe('applied');
   });
 });
@@ -290,5 +306,96 @@ describe('checking the destination', () => {
     });
     expect(result.outcome).toBe('invalid-settings');
     expect(dav.requests).toHaveLength(0);
+  });
+});
+
+describe('another owner id', () => {
+  const marked = (uid: string, owner: string | undefined) =>
+    `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nSUMMARY:${uid}\r\n${
+      owner ? `X-MIRRORCAL-OWNER:${owner}\r\n` : ''
+    }END:VEVENT\r\nEND:VCALENDAR\r\n`;
+  const reset = (over: Partial<Parameters<typeof resetMirror>[0]> = {}) =>
+    resetMirror({ fetch: dav.fetch, settings: testSettings(), mode: 'count', ...over });
+
+  beforeEach(() => {
+    dav.seed('l1.ics', marked('l1', 'laptop'));
+    dav.seed('l2.ics', marked('l2', 'laptop'));
+    dav.seed('p1.ics', marked('p1', 'phone'));
+    dav.seed('plain.ics', marked('plain', undefined));
+  });
+
+  test('is listed with counts when counting', async () => {
+    const result = await reset();
+    expect(result.otherOwners).toEqual([
+      { id: 'laptop', count: 2 },
+      { id: 'phone', count: 1 },
+    ]);
+    expect(result.own).toBe(0);
+  });
+
+  test('its events are counted first and then deleted, and nothing else', async () => {
+    const counted = await reset({ ownerId: 'laptop' });
+    expect(counted.own).toBe(2);
+    expect(dav.writes).toHaveLength(0);
+    const done = await reset({ mode: 'apply', ownerId: 'laptop', confirmedCount: 2 });
+    expect(done).toMatchObject({ outcome: 'reset', deleted: 2 });
+    expect([...dav.objects.keys()].sort()).toEqual(['p1.ics', 'plain.ics']);
+  });
+
+  test('an object without any owner marker is never deleted, whatever id is named', async () => {
+    for (const ownerId of ['laptop', 'phone', 'plain', 'x']) {
+      const counted = await reset({ ownerId });
+      await reset({ mode: 'apply', ownerId, confirmedCount: counted.own });
+    }
+    expect([...dav.objects.keys()]).toEqual(['plain.ics']);
+  });
+
+  test('a changed count refuses the deletion, and an invalid id is refused', async () => {
+    expect((await reset({ mode: 'apply', ownerId: 'laptop', confirmedCount: 1 })).outcome).toBe(
+      'refused',
+    );
+    expect((await reset({ ownerId: 'bad id!' })).outcome).toBe('invalid-settings');
+    expect(dav.objects.size).toBe(4);
+  });
+
+  test('confirming it once is remembered for that set of owners', async () => {
+    dav.remove('l2.ics');
+    dav.remove('p1.ics');
+    dav.remove('plain.ics');
+    const held = await run();
+    expect(held.guard?.code).toBe('other-owner');
+    const confirmed = await run({
+      confirmMassChange: true,
+      confirmedPlanDigest: held.digest as string,
+    });
+    expect(confirmed.acknowledgedOwners).toEqual(['laptop']);
+    outlook.events.push(
+      rawEvent({ id: outlookId(9), start: '2026-10-10T08:00:00', end: '2026-10-10T09:00:00' }),
+    );
+    expect((await run()).outcome).toBe('needs-confirmation');
+    const next = await run({ acknowledgedOwners: ['laptop'] });
+    expect(next.outcome).toBe('applied');
+    expect(next.counts.created).toBe(1);
+  });
+
+  test('a new owner among acknowledged ones holds back again', async () => {
+    dav.remove('plain.ics');
+    const result = await run({ acknowledgedOwners: ['laptop'] });
+    expect(result.guard?.code).toBe('other-owner');
+    expect(result.guard?.message).toContain('phone');
+  });
+});
+
+describe('failure kinds', () => {
+  test('write failures carry a code that does not depend on the wording', async () => {
+    dav.failWhen = (method) => (method === 'PUT' ? 403 : undefined);
+    const result = await run();
+    expect(result.errors.every((e) => e.code === 'http:403')).toBe(true);
+  });
+
+  test('a destination failure carries its status', async () => {
+    dav.failWhen = () => 503;
+    const result = await run();
+    expect(result.error).toMatchObject({ source: 'caldav', code: 'http', status: 503 });
   });
 });

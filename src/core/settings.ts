@@ -101,6 +101,8 @@ function checkPrivatePolicy(errors: string[], policy: unknown) {
 }
 
 /** Problems that make the destination unusable (also what a mirror reset needs). */
+export const OWNER_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
 export function validateDestination(settings: Settings): string[] {
   const errors: string[] = [];
   if (typeof settings.caldavUrl !== 'string' || settings.caldavUrl.trim() === '') {
@@ -112,7 +114,12 @@ export function validateDestination(settings: Settings): string[] {
       if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
         errors.push('Calendar URL must use https');
       }
-      if ((OUTLOOK_HOSTS as readonly string[]).includes(url.hostname)) {
+      // `host.` and `host%2e` are the same host as `host`.
+      if (
+        (OUTLOOK_HOSTS as readonly string[]).includes(
+          url.hostname.replace(/\.+$/, '').toLowerCase(),
+        )
+      ) {
         errors.push('Calendar URL must not point at Outlook');
       }
     } catch {
@@ -125,7 +132,7 @@ export function validateDestination(settings: Settings): string[] {
   if (typeof settings.password !== 'string' || settings.password === '') {
     errors.push('Password is required');
   }
-  if (typeof settings.ownerId !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(settings.ownerId)) {
+  if (typeof settings.ownerId !== 'string' || !OWNER_ID_PATTERN.test(settings.ownerId)) {
     errors.push('Owner id must be 1-64 letters, digits, dot, dash or underscore');
   }
   return errors;

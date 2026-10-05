@@ -8,6 +8,7 @@ import {
   loadAccount,
   loadBackoff,
   loadPasswordRejected,
+  loadStatus,
   loadToken,
   saveSettings,
   saveToken,
@@ -15,10 +16,11 @@ import {
 import { FakeCalDav, routeFetch } from './helpers/fake-caldav.ts';
 import { installFakeChrome } from './helpers/fake-chrome.ts';
 import { FakeOutlook } from './helpers/fake-outlook.ts';
-import { makeJwt, sampleWeek, testSettings } from './helpers/fixtures.ts';
+import { makeJwt, outlookId, rawEvent, sampleWeek, testSettings } from './helpers/fixtures.ts';
 
 const realFetch = globalThis.fetch;
 const FAR_FUTURE = 4_000_000_000;
+const USER_A = { tenant: 't1', oid: 'user-a', name: 'a@example.test', label: 'a@example.test' };
 const TOKEN = makeJwt({ exp: FAR_FUTURE, tid: 't1', oid: 'user-a', upn: 'a@example.test' });
 
 let fake: ReturnType<typeof installFakeChrome>;
@@ -45,7 +47,7 @@ async function configure(settings: Settings = testSettings()) {
   await saveToken({
     token: TOKEN,
     exp: FAR_FUTURE,
-    account: { id: 't1/user-a', label: 'a@example.test' },
+    account: USER_A,
   });
 }
 
@@ -211,7 +213,7 @@ describe('the mirrored account', () => {
     expect((await buildStatus()).account).toEqual({ label: 'a@example.test', pinned: false });
     expect(await loadAccount()).toBeUndefined();
     await sync();
-    expect(await loadAccount()).toEqual({ id: 't1/user-a', label: 'a@example.test' });
+    expect(await loadAccount()).toEqual(USER_A);
     expect((await buildStatus()).account).toEqual({ label: 'a@example.test', pinned: true });
   });
 
@@ -237,7 +239,11 @@ describe('the mirrored account', () => {
     expect((await loadToken())?.token).toBe(TOKEN);
 
     // Even a stored token of someone else is refused before any request goes out.
-    await saveToken({ token: other, exp: FAR_FUTURE, account: { id: 't1/user-b', label: 'b' } });
+    await saveToken({
+      token: other,
+      exp: FAR_FUTURE,
+      account: { tenant: 't1', oid: 'user-b', label: 'b' },
+    });
     outlook.requests.length = 0;
     outlook.expectedToken = other;
     dav.clearRequests();
@@ -252,6 +258,8 @@ describe('the mirrored account', () => {
     const done = await runResetFlight('apply', 7);
     expect(done.busy ? undefined : done.value.outcome).toBe('reset');
     expect(await loadAccount()).toBeUndefined();
+    expect(await loadToken()).toBeNull();
+    await configure();
     await sync();
     expect(await loadAccount()).toBeDefined();
     await clearAccount();
@@ -266,5 +274,79 @@ describe('keeping the worker alive', () => {
     expect(during).toBeGreaterThanOrEqual(3);
     await Bun.sleep(40);
     expect(fake.state.platformCalls).toBe(during);
+  });
+});
+
+describe('another owner id in the calendar', () => {
+  const foreignOwner = (uid: string) =>
+    `BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nX-MIRRORCAL-OWNER:laptop\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`;
+
+  test('a confirmation is remembered, so later creations are not held back again', async () => {
+    await configure();
+    dav.seed('l.ics', foreignOwner('l'));
+    const held = await sync();
+    expect(held.record.guard?.code).toBe('other-owner');
+    const done = await sync('manual', 'apply', { digest: held.record.digest as string });
+    expect(done.record.outcome).toBe('applied');
+    outlook.events.push(
+      rawEvent({ id: outlookId(9), start: '2026-10-10T08:00:00', end: '2026-10-10T09:00:00' }),
+    );
+    expect((await sync()).record.outcome).toBe('applied');
+  });
+
+  test('its events can be removed on their own, without releasing the account', async () => {
+    await configure();
+    await sync();
+    dav.seed('l.ics', foreignOwner('l'));
+    const counted = await runResetFlight('count', undefined, 'laptop');
+    expect(counted.busy ? undefined : counted.value.own).toBe(1);
+    const done = await runResetFlight('apply', 1, 'laptop');
+    expect(done.busy ? undefined : done.value.deleted).toBe(1);
+    expect(dav.objects.size).toBe(7);
+    expect(await loadAccount()).toEqual(USER_A);
+  });
+});
+
+describe('waiting for a session while bound', () => {
+  test('says how many sign-ins of another account were ignored', async () => {
+    await configure();
+    await sync();
+    for (const oid of ['b', 'c']) {
+      const jwt = makeJwt({ exp: FAR_FUTURE, tid: 't1', oid, upn: `${oid}@example.test` });
+      await captureToken({
+        initiator: 'https://outlook.cloud.microsoft',
+        requestHeaders: [{ name: 'Authorization', value: `Bearer ${jwt}` }],
+      });
+    }
+    await saveToken({ token: TOKEN, exp: 1_000 });
+    const { record } = await sync();
+    expect(record.outcome).toBe('no-token');
+    expect(record.message).toContain('2 sign-ins of another account ignored');
+    expect((await buildStatus()).ignoredTokens).toBe(2);
+  });
+});
+
+describe('failures that read differently each time', () => {
+  test('still count as the same failure', async () => {
+    await configure();
+    let flip = false;
+    globalThis.fetch = routeFetch({
+      'outlook.cloud.microsoft': outlook.fetch,
+      'dav.example.test': async (_url, init) => {
+        if (init?.method !== 'REPORT') throw new TypeError('offline');
+        flip = !flip;
+        if (flip) throw new TypeError('offline');
+        const timeout = new Error('slow');
+        timeout.name = 'TimeoutError';
+        throw timeout;
+      },
+    }) as typeof fetch;
+    for (let i = 0; i < 3; i++) {
+      expect((await sync()).record.outcome).toBe('destination-failed');
+    }
+    expect((await loadStatus()).log).toHaveLength(1);
+    expect((await loadStatus()).log[0]?.repeats).toBe(3);
+    expect(fake.state.badge).toBe('!');
+    expect((await sync()).record.outcome).toBe('skipped');
   });
 });

@@ -293,3 +293,13 @@ describe('private events', () => {
     expect(isExcluded(secret('Normal'), s, [])).toBe(false);
   });
 });
+
+describe('case folding', () => {
+  const matches = (p: string, t: string) => compileTitleFilter(p)?.(t) ?? false;
+
+  test('Greek final sigma folds like any other letter', () => {
+    expect(matches('ΟΔΟΣ', 'οδος')).toBe(true);
+    expect(matches('οδοσ', 'ΟΔΟΣ')).toBe(true);
+    expect(matches('ς', 'Σ')).toBe(true);
+  });
+});

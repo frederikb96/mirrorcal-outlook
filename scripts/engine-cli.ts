@@ -10,7 +10,7 @@
  *   --confirm           let a plan through that the safety guards would hold back
  *   --digest <hash>     with --confirm: only for the plan carrying this digest
  *   --ics               include the generated ICS in the plan entries
- *   --account <id>      refuse a token that was not issued to this account (`account.id` of an earlier result)
+ *   --account <json>   refuse a token issued to another account (`account` of an earlier result, as JSON)
  *   --now <iso>         run as if it were this moment
  *   --reset-count       count the mirrored objects in the destination
  *   --reset <count>     delete every mirrored object; <count> must match the current count
@@ -60,7 +60,7 @@ if (flag('--reset-count') || option('--reset') !== undefined) {
     now: new Date(option('--now') ?? Date.now()),
     mode,
     includeIcs: flag('--ics'),
-    ...(option('--account') ? { expectedAccount: option('--account') as string } : {}),
+    ...(option('--account') ? { expectedAccount: JSON.parse(option('--account') as string) } : {}),
     ...(flag('--confirm') ? { confirmMassChange: true } : {}),
     ...(digest ? { confirmedPlanDigest: digest } : {}),
   });

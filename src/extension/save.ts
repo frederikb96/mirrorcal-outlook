@@ -32,7 +32,7 @@ export async function saveSettingsFlow(draft: Settings): Promise<SaveResponse> {
   if (errors.length > 0) return { saved: false, errors };
 
   const check = await checkDestination({ fetch: doFetch, settings });
-  if (check.outcome !== 'ok' && check.outcome !== 'unreachable') {
+  if (check.outcome === 'not-a-calendar' || check.outcome === 'auth-failed') {
     return { saved: false, errors: [check.message] };
   }
   await saveSettings(settings);
@@ -43,7 +43,7 @@ export async function saveSettingsFlow(draft: Settings): Promise<SaveResponse> {
     connection:
       check.outcome === 'ok'
         ? check.message
-        : `Could not reach the calendar server to check it: ${check.message}`,
+        : `The calendar could not be checked (${check.message}); it is used as entered`,
     sync: admitted.busy ? { busy: true } : { busy: false, ...admitted.value },
   };
 }
