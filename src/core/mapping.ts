@@ -80,10 +80,12 @@ function cleanText(value: string | undefined): string | undefined {
   return text === '' ? undefined : text;
 }
 
+/** Replacement text stands in for a value the source has; an empty field stays empty. */
 function applyPolicy(value: string | undefined, policy: TextPolicy): string | undefined {
   if (policy.mode === 'drop') return undefined;
-  if (policy.mode === 'replace') return cleanText(policy.text);
-  return cleanText(value);
+  const text = cleanText(value);
+  if (policy.mode === 'replace') return text === undefined ? undefined : cleanText(policy.text);
+  return text;
 }
 
 function addDay(date: string): string {

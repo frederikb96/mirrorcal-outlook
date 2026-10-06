@@ -50,6 +50,7 @@ export interface SourceEvent {
   showAs: ShowAs;
   sensitivity: Sensitivity;
   location?: string;
+  /** The body, or only its preview when the description policy replaces it. */
   body?: string;
   organizer?: Person;
   attendees?: SourceAttendee[];

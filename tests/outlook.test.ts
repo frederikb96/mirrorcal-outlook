@@ -12,7 +12,7 @@ import { outlookId, rawEvent, sampleWeek, TOKEN, testSettings } from './helpers/
 
 const start = new Date('2026-09-05T00:00:00Z');
 const end = new Date('2027-04-05T00:00:00Z');
-const NEEDS = { location: false, body: false, attendees: false };
+const NEEDS = { location: false, body: false, bodyPresence: false, attendees: false };
 const GOOD = calendarViewUrl('outlook.cloud.microsoft', start, end, NEEDS);
 
 function query(outlook: FakeOutlook, needs = NEEDS, token = TOKEN) {
@@ -155,12 +155,17 @@ describe('reading the calendar view', () => {
       new URL(calendarViewUrl('outlook.office.com', start, end, needs)).searchParams.get('$select');
     expect(select(NEEDS)).not.toMatch(/Body|Location|Attendees|Organizer/);
     expect(select({ ...NEEDS, body: true })).toContain('Body');
+    expect(select({ ...NEEDS, bodyPresence: true })).toMatch(/BodyPreview/);
+    expect(select({ ...NEEDS, bodyPresence: true })).not.toMatch(/Body,|Body$/);
     expect(select({ ...NEEDS, location: true })).toContain('Location');
     expect(select({ ...NEEDS, attendees: true })).toContain('Attendees');
     expect(fieldNeeds(testSettings())).toEqual(NEEDS);
     const s = testSettings();
     s.policies.attendees = 'copy';
     expect(fieldNeeds(s).attendees).toBe(true);
+    s.policies.description = { mode: 'replace', text: 'x' };
+    s.policies.location = { mode: 'replace', text: 'y' };
+    expect(fieldNeeds(s)).toMatchObject({ body: false, bodyPresence: true, location: true });
   });
 
   test('parses people and text when requested', async () => {
@@ -177,7 +182,9 @@ describe('reading the calendar view', () => {
         ],
       }),
     ]);
-    const [event] = (await query(outlook, { location: true, body: true, attendees: true })).events;
+    const [event] = (
+      await query(outlook, { location: true, body: true, bodyPresence: false, attendees: true })
+    ).events;
     expect(event?.location).toBe('Room 4');
     expect(event?.body).toBe('Agenda');
     expect(event?.organizer?.address).toBe('pat@example.test');

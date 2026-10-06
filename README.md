@@ -40,7 +40,7 @@ Open the extension's options page.
 - **Time window.** Days back and days ahead, relative to now.
 - **Sync interval.** How often the scheduled sync runs.
 - **Outlook host.** Which of the Outlook web hosts the calendar is read from (`outlook.cloud.microsoft`, `outlook.office.com`, `outlook.office365.com`). Pick the one the Outlook tab uses.
-- **Field policies.** Title, description and location can each be copied, dropped or replaced with fixed text. Attendees can be copied or dropped. By default the title is copied and everything else is dropped. Copying descriptions reads every event body on each sync.
+- **Field policies.** Title, description and location can each be copied, dropped or replaced with fixed text. The replacement only stands in where the event has that field; an event without a description or location stays without one. Attendees can be copied or dropped. By default the title is copied and everything else is dropped. Copying descriptions reads every event body on each sync.
 - **Private events.** Events that Outlook marks private, personal or confidential are written with a matching `CLASS`, so calendar apps and sharing treat them as private. By default they get the title "Private" and no description, location or attendees. They can instead be copied as they are, replaced with another text, or not mirrored at all.
 - **Title filters.** Events whose title matches an entry are not mirrored. Matching ignores case and surrounding whitespace, is exact by default, and `*` is a wildcard. Adding a filter removes the matching copies on the next sync, removing it brings them back.
 - **Availability.** Events with a checked availability (free, tentative, busy, out of office, working elsewhere, unknown) are not mirrored.

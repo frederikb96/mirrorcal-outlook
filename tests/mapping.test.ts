@@ -79,13 +79,29 @@ describe('field policies', () => {
     expect(m.organizer?.address).toBe('pat@example.test');
   });
 
-  test('replace substitutes fixed text, whatever the source holds', () => {
+  test('replace substitutes fixed text where the source has a value', () => {
     const s = testSettings();
     s.policies.title = { mode: 'replace', text: 'Meeting' };
     s.policies.location = { mode: 'replace', text: 'Office' };
-    const m = mapEvent(source(), s);
+    s.policies.description = { mode: 'replace', text: 'Details in Outlook' };
+    const m = mapEvent(source({ location: 'Room 4', body: 'Agenda' }), s);
     expect(m.summary).toBe('Meeting');
     expect(m.location).toBe('Office');
+    expect(m.description).toBe('Details in Outlook');
+  });
+
+  test('replace leaves a field empty when the source has none', () => {
+    const s = testSettings();
+    s.policies.location = { mode: 'replace', text: 'Office' };
+    s.policies.description = { mode: 'replace', text: 'Details in Outlook' };
+    for (const src of [
+      source({ location: undefined, body: undefined }),
+      source({ location: '  ', body: '\r\n' }),
+    ]) {
+      const m = mapEvent(src, s);
+      expect(m.location).toBeUndefined();
+      expect(m.description).toBeUndefined();
+    }
   });
 
   test('the summary is never empty', () => {

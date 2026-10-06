@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-06
+
+### Fixed
+
+- A replaced description or location is only written for events that have one; events without a description or location no longer receive the replacement text.
+
 ## [0.1.0] - 2026-10-05
 
 ### Added

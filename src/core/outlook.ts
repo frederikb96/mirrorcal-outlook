@@ -40,14 +40,17 @@ export class OutlookReadError extends Error {
 export interface FieldNeeds {
   location: boolean;
   body: boolean;
+  /** Only whether a body exists: the short preview instead of the full body. */
+  bodyPresence: boolean;
   attendees: boolean;
 }
 
 export function fieldNeeds(settings: Settings): FieldNeeds {
   const { policies } = settings;
   return {
-    location: policies.location.mode === 'copy',
+    location: policies.location.mode !== 'drop',
     body: policies.description.mode === 'copy',
+    bodyPresence: policies.description.mode === 'replace',
     attendees: policies.attendees === 'copy',
   };
 }
@@ -67,6 +70,7 @@ function selectedFields(needs: FieldNeeds): string[] {
   const fields = [...BASE_FIELDS];
   if (needs.location) fields.push('Location');
   if (needs.body) fields.push('Body');
+  else if (needs.bodyPresence) fields.push('BodyPreview');
   if (needs.attendees) fields.push('Attendees', 'Organizer');
   return fields;
 }
@@ -212,6 +216,7 @@ function parseEvent(item: unknown, index: number): SourceEvent | undefined {
     event.location = item.Location.DisplayName;
   }
   if (isRecord(item.Body) && typeof item.Body.Content === 'string') event.body = item.Body.Content;
+  else if (typeof item.BodyPreview === 'string') event.body = item.BodyPreview;
   if ('Attendees' in item) event.attendees = parseAttendees(item.Attendees);
   const organizer = parsePerson(item.Organizer);
   if (organizer) event.organizer = organizer;
