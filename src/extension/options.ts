@@ -1,5 +1,5 @@
 import { OUTLOOK_HOSTS } from '../core/constants.ts';
-import type { PlanEntry, PlanView } from '../core/engine.ts';
+import type { PlanEntry, PlanView, SyncCounts } from '../core/engine.ts';
 import {
   originPattern,
   parseWholeNumber,
@@ -22,7 +22,7 @@ import type {
   SyncResponse,
 } from './messages.ts';
 import { buildStatus, ignoredTokensNote } from './status.ts';
-import { loadSettings } from './storage.ts';
+import { errorCount, loadSettings } from './storage.ts';
 
 const OUTCOME_LABEL: Record<string, string> = {
   applied: 'Synced',
@@ -58,7 +58,7 @@ const SHOW_AS_LABEL: Record<ShowAs, string> = {
 };
 
 /** A run that wrote everything it meant to; one with failed writes is not a clean sync. */
-const hasErrors = (record: RunRecord) => (record.counts?.errors ?? 0) > 0;
+const hasErrors = (record: RunRecord) => errorCount(record) > 0;
 
 function outcomeLabel(record: RunRecord): string {
   if (record.outcome === 'applied' && hasErrors(record)) return 'Synced with errors';
@@ -133,6 +133,7 @@ function buildForm() {
 function fillForm(settings: Settings) {
   el<HTMLInputElement>('enabled').checked = settings.enabled;
   el<HTMLInputElement>('caldavUrl').value = settings.caldavUrl;
+  el<HTMLInputElement>('excludedCaldavUrl').value = settings.excludedCaldavUrl;
   el<HTMLInputElement>('username').value = settings.username;
   el<HTMLInputElement>('password').value = '';
   el<HTMLInputElement>('password').placeholder = settings.password
@@ -161,6 +162,15 @@ function fillForm(settings: Settings) {
   for (const box of document.querySelectorAll<HTMLInputElement>('input[name="excludeShowAs"]')) {
     box.checked = settings.excludeShowAs.includes(box.value as ShowAs);
   }
+  showWhereExcludedGo();
+}
+
+/** Says where the excluded events end up, following the second calendar field as it is typed. */
+function showWhereExcludedGo() {
+  const second = el<HTMLInputElement>('excludedCaldavUrl').value.trim() !== '';
+  el('excluded-where').textContent = second
+    ? 'Events matching these filters are left out of the calendar and mirrored into the calendar for excluded events.'
+    : 'Events matching these filters are not mirrored. Set a calendar URL for excluded events to mirror them there instead.';
 }
 
 function readPolicy(field: PolicyField): TextPolicy {
@@ -183,6 +193,7 @@ function readForm(): Settings {
   return {
     enabled: el<HTMLInputElement>('enabled').checked,
     caldavUrl: value('caldavUrl'),
+    excludedCaldavUrl: value('excludedCaldavUrl'),
     username: value('username'),
     password: el<HTMLInputElement>('password').value,
     ownerId: value('ownerId'),
@@ -245,7 +256,8 @@ async function save() {
   fillForm(current);
   const sync = response.sync;
   const outcome = sync && !sync.busy ? describe(sync) : 'A sync was already running';
-  setMessage(`Saved. ${response.connection ?? ''} ${outcome}`.trim(), 'info', 'save-message');
+  const connection = response.connection ? `${response.connection}. ` : '';
+  setMessage(`Saved. ${connection}${outcome}`, 'info', 'save-message');
   if (sync) showSyncResult(sync);
 }
 
@@ -264,13 +276,26 @@ async function onSave(event: Event) {
 
 const when = (iso: string) => new Date(iso).toLocaleString();
 
-function countsLine(record: RunRecord): string {
-  const c = record.counts;
+function countsLine(record: RunRecord, c = record.counts): string {
   if (!c) return '';
   if (record.outcome === 'applied') {
     return `${c.created} created, ${c.updated} updated, ${c.deleted} deleted, ${c.unchanged} unchanged${c.errors ? `, ${c.errors} failed` : ''}`;
   }
   return `${c.create} to create, ${c.update} to update, ${c.delete} to delete, ${c.unchanged} unchanged`;
+}
+
+/** Both calendars' changes, the second one's named. */
+function changesLine(record: RunRecord): string {
+  const excluded = countsLine(record, record.excludedCounts);
+  return [countsLine(record), excluded && `excluded events: ${excluded}`]
+    .filter(Boolean)
+    .join('; ');
+}
+
+/** What a calendar holds of this mirror once the run's own writes are counted in. */
+function holdsLine(record: RunRecord, c: SyncCounts): string {
+  const own = record.outcome === 'applied' ? c.own + c.created - c.deleted : c.own;
+  return `${own} mirrored, ${c.foreign} other objects left alone`;
 }
 
 function addRow(list: HTMLElement, label: string, value: string) {
@@ -311,12 +336,17 @@ function renderStatus(status: StatusResponse) {
     addRow(list, 'Last run', `${when(run.finishedAt)}: ${outcomeLabel(run)}`);
     const counts = countsLine(run);
     if (counts) addRow(list, 'Changes', counts);
+    const excluded = countsLine(run, run.excludedCounts);
+    if (excluded) addRow(list, 'Changes, excluded events', excluded);
     if (run.counts) {
       addRow(
         list,
         'Calendar',
-        `${run.counts.own} mirrored, ${run.counts.foreign} other objects left alone, ${run.counts.source} events read from Outlook`,
+        `${holdsLine(run, run.counts)}, ${run.counts.source} events read from Outlook`,
       );
+    }
+    if (run.excludedCounts) {
+      addRow(list, 'Calendar for excluded events', holdsLine(run, run.excludedCounts));
     }
     if (run.message) addRow(list, 'Message', run.message);
   } else {
@@ -357,7 +387,7 @@ function renderHistory(log: RunRecord[]) {
     const parts = [
       when(record.finishedAt),
       outcomeLabel(record) + (record.repeats > 1 ? ` (${record.repeats} times)` : ''),
-      countsLine(record),
+      changesLine(record),
       record.message,
     ];
     const item = document.createElement('li');
@@ -403,16 +433,36 @@ function group(title: string, entries: PlanEntry[]): HTMLElement | undefined {
   return details;
 }
 
-function renderPlan(plan: PlanView, open: 'deletions' | 'creations' | undefined) {
-  const box = el('plan');
-  box.replaceChildren();
-  const groups = [
+function planGroups(plan: PlanView): HTMLElement[] {
+  return [
     group('Create', plan.creations),
     group('Update', plan.updates),
     group('Delete', plan.deletions),
     group('Blocked by an object that is not owned', plan.conflicts),
-  ];
-  for (const g of groups) if (g) box.append(g);
+  ].filter((g) => g !== undefined);
+}
+
+function renderPlan(
+  plan: PlanView | undefined,
+  excludedPlan: PlanView | undefined,
+  open: 'deletions' | 'creations' | undefined,
+) {
+  const box = el('plan');
+  box.replaceChildren();
+  const main = plan ? planGroups(plan) : [];
+  const excluded = excludedPlan ? planGroups(excludedPlan) : [];
+  if (excludedPlan && main.length + excluded.length > 0) {
+    const heading = document.createElement('h3');
+    heading.textContent = 'Calendar';
+    box.append(heading);
+    if (main.length === 0) box.append('Nothing to change.');
+  }
+  box.append(...main);
+  if (excluded.length > 0) {
+    const heading = document.createElement('h3');
+    heading.textContent = 'Calendar for excluded events';
+    box.append(heading, ...excluded);
+  }
   const sections = box.querySelectorAll('details');
   const focus = open === 'deletions' ? 'Delete' : open === 'creations' ? 'Create' : undefined;
   for (const d of sections) if (focus && d.textContent?.startsWith(focus)) d.open = true;
@@ -448,7 +498,7 @@ async function busyWhile(work: () => Promise<void>) {
 function describe(response: SyncResponse): string {
   if (response.busy) return 'A sync is already running. Try again in a moment.';
   const record = response.record as RunRecord;
-  const parts = [outcomeLabel(record), countsLine(record), record.message];
+  const parts = [outcomeLabel(record), changesLine(record), record.message];
   return parts.filter(Boolean).join(': ');
 }
 
@@ -461,7 +511,9 @@ function planFocus(record: RunRecord | undefined): 'deletions' | 'creations' | u
 
 /** Shows what a sync that was started from the page left behind: plan and confirmation. */
 function showSyncResult(response: SyncResponse) {
-  if (response.plan) renderPlan(response.plan, planFocus(response.record));
+  if (response.plan || response.excludedPlan) {
+    renderPlan(response.plan, response.excludedPlan, planFocus(response.record));
+  }
   if (response.record?.outcome === 'needs-confirmation') {
     showConfirm(response.record);
     el('status-panel').scrollIntoView();
@@ -485,7 +537,9 @@ async function onPreview() {
     setMessage('Reading Outlook and the calendar…');
     const response = await send<SyncResponse>({ type: 'sync', mode: 'preview' });
     setMessage(describe(response), isClean(response.record, 'preview') ? 'info' : 'error');
-    if (response.plan) renderPlan(response.plan, planFocus(response.record));
+    if (response.plan || response.excludedPlan) {
+      renderPlan(response.plan, response.excludedPlan, planFocus(response.record));
+    }
     showConfirm(response.record);
   });
 }
@@ -547,7 +601,7 @@ async function onReset() {
     resetOwner(
       undefined,
       (own, foreign) =>
-        `Delete all ${own} mirrored events from the calendar? ${foreign} other objects are left alone. While syncing is on, the next run recreates the mirror (and asks for confirmation if other objects remain): switch syncing off first to stop mirroring.`,
+        `Delete all ${own} mirrored events from ${current.excludedCaldavUrl ? 'both calendars' : 'the calendar'}? ${foreign} other objects are left alone. While syncing is on, the next run recreates the mirror (and asks for confirmation if other objects remain): switch syncing off first to stop mirroring.`,
     ),
   );
 }
@@ -600,6 +654,7 @@ async function init() {
   current = (await loadSettings()).settings;
   fillForm(current);
   el('settings').addEventListener('submit', (e) => void onSave(e));
+  el('excludedCaldavUrl').addEventListener('input', showWhereExcludedGo);
   el('sync').addEventListener('click', () => void onSync());
   el('preview').addEventListener('click', () => void onPreview());
   el('confirm').addEventListener('click', () => void onConfirm());

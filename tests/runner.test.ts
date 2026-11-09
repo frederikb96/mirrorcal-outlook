@@ -1,12 +1,20 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test';
 import type { Settings } from '../src/core/types.ts';
 import type { RunRecord } from '../src/extension/messages.ts';
 import { runResetFlight, runSyncFlight } from '../src/extension/runner.ts';
 import { loadStatus, loadToken, saveSettings, saveToken } from '../src/extension/storage.ts';
-import { FakeCalDav, routeFetch } from './helpers/fake-caldav.ts';
+import { FakeCalDav, routeCalendars, routeFetch } from './helpers/fake-caldav.ts';
 import { installFakeChrome } from './helpers/fake-chrome.ts';
 import { FakeOutlook } from './helpers/fake-outlook.ts';
-import { outlookId, rawEvent, sampleWeek, TOKEN, testSettings } from './helpers/fixtures.ts';
+import {
+  EXCLUDED_COLLECTION,
+  NOW,
+  outlookId,
+  rawEvent,
+  sampleWeek,
+  TOKEN,
+  testSettings,
+} from './helpers/fixtures.ts';
 
 const realFetch = globalThis.fetch;
 let fake: ReturnType<typeof installFakeChrome>;
@@ -16,6 +24,8 @@ let dav: FakeCalDav;
 const FAR_FUTURE = 4_000_000_000;
 
 beforeEach(async () => {
+  // The fixture week sits inside the sync window only around NOW.
+  setSystemTime(NOW);
   fake = installFakeChrome();
   outlook = new FakeOutlook(TOKEN, sampleWeek());
   dav = new FakeCalDav();
@@ -26,6 +36,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  setSystemTime();
   globalThis.fetch = realFetch;
 });
 
@@ -86,6 +97,25 @@ describe('a run', () => {
     expect(status.lastSuccessAt).toBe(record.finishedAt);
     expect(status.log).toHaveLength(1);
     expect(dav.objects.size).toBe(7);
+  });
+
+  test('with a calendar for excluded events, both are recorded and both stay quiet', async () => {
+    const other = new FakeCalDav(EXCLUDED_COLLECTION);
+    globalThis.fetch = routeFetch({
+      'outlook.cloud.microsoft': outlook.fetch,
+      'dav.example.test': routeCalendars(dav, other),
+    }) as typeof fetch;
+    await configure(
+      testSettings({ titleFilters: ['Sport'], excludedCaldavUrl: EXCLUDED_COLLECTION }),
+    );
+    const { record } = await sync();
+    expect(record.counts?.created).toBe(6);
+    expect(record.excludedCounts?.created).toBe(1);
+    await sync();
+    other.clearRequests();
+    const quiet = await sync();
+    expect(quiet.record.excludedCounts).toMatchObject({ own: 1, unchanged: 1 });
+    expect(other.requests.map((r) => r.method)).toEqual(['PROPFIND']);
   });
 
   test('no event titles are kept in the stored status', async () => {

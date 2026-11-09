@@ -42,7 +42,16 @@ export class FakeCalDav {
   /** Fail the next request(s) matching this predicate with the given status. */
   failWhen?: (method: string, url: string) => number | undefined;
 
-  private root = new URL(COLLECTION).pathname;
+  private root: string;
+
+  constructor(collection = COLLECTION) {
+    this.root = new URL(collection).pathname;
+  }
+
+  /** Whether a request URL addresses this calendar. */
+  owns(url: string): boolean {
+    return new URL(url).pathname.startsWith(this.root);
+  }
 
   private nextEtag(): string {
     this.counter += 1;
@@ -183,5 +192,14 @@ export function routeFetch(routes: Record<string, FetchLike>): FetchLike {
     const handler = routes[host];
     if (!handler) throw new Error(`unexpected request to ${host}`);
     return handler(input, init);
+  };
+}
+
+/** Serves several calendars on one host, each request going to the calendar whose path it names. */
+export function routeCalendars(...calendars: FakeCalDav[]): FetchLike {
+  return async (input, init) => {
+    const calendar = calendars.find((c) => c.owns(input));
+    if (!calendar) throw new Error(`no calendar at ${input}`);
+    return calendar.fetch(input, init);
   };
 }

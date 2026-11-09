@@ -11,6 +11,7 @@ export const LIMITS = {
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
   caldavUrl: '',
+  excludedCaldavUrl: '',
   username: '',
   password: '',
   ownerId: 'outlook',
@@ -100,31 +101,58 @@ function checkPrivatePolicy(errors: string[], policy: unknown) {
   }
 }
 
-/** Problems that make the destination unusable (also what a mirror reset needs). */
 export const OWNER_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
+/** Problems with one calendar URL; `label` names the field in the messages. */
+function checkCalendarUrl(errors: string[], label: string, value: unknown): URL | undefined {
+  if (typeof value !== 'string' || value.trim() === '') {
+    errors.push(`${label} is required`);
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    errors.push(`${label} is not a valid URL`);
+    return undefined;
+  }
+  if (url.username || url.password) errors.push(`${label} must not contain credentials`);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+    errors.push(`${label} must use https`);
+  }
+  // `host.` and `host%2e` are the same host as `host`.
+  if (
+    (OUTLOOK_HOSTS as readonly string[]).includes(url.hostname.replace(/\.+$/, '').toLowerCase())
+  ) {
+    errors.push(`${label} must not point at Outlook`);
+  }
+  return url;
+}
+
+/** The second calendar shares the server and credentials of the first, never its collection. */
+function checkExcludedUrl(errors: string[], main: URL | undefined, value: unknown) {
+  if (value === '') return;
+  const excluded = checkCalendarUrl(errors, 'Calendar URL for excluded events', value);
+  if (!excluded || !main) return;
+  if (excluded.origin !== main.origin) {
+    errors.push('The calendar for excluded events must be on the same server as the calendar');
+    return;
+  }
+  const a = normalizeCaldavUrl(main.pathname);
+  const b = normalizeCaldavUrl(excluded.pathname);
+  if (a.startsWith(b) || b.startsWith(a)) {
+    errors.push('The calendar for excluded events must be a different calendar');
+  }
+}
+
+/** Problems that make the destination unusable (also what a mirror reset needs). */
 export function validateDestination(settings: Settings): string[] {
   const errors: string[] = [];
-  if (typeof settings.caldavUrl !== 'string' || settings.caldavUrl.trim() === '') {
-    errors.push('Calendar URL is required');
+  const main = checkCalendarUrl(errors, 'Calendar URL', settings.caldavUrl);
+  if (typeof settings.excludedCaldavUrl !== 'string') {
+    errors.push('Calendar URL for excluded events must be text');
   } else {
-    try {
-      const url = new URL(settings.caldavUrl);
-      if (url.username || url.password) errors.push('Calendar URL must not contain credentials');
-      if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
-        errors.push('Calendar URL must use https');
-      }
-      // `host.` and `host%2e` are the same host as `host`.
-      if (
-        (OUTLOOK_HOSTS as readonly string[]).includes(
-          url.hostname.replace(/\.+$/, '').toLowerCase(),
-        )
-      ) {
-        errors.push('Calendar URL must not point at Outlook');
-      }
-    } catch {
-      errors.push('Calendar URL is not a valid URL');
-    }
+    checkExcludedUrl(errors, main, settings.excludedCaldavUrl);
   }
   if (typeof settings.username !== 'string' || settings.username === '') {
     errors.push('User name is required');

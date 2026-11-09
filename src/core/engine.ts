@@ -3,10 +3,11 @@
  * service worker, Node, Bun); it touches no `chrome.*` API.
  *
  * Entry points:
- * - `runSync({ fetch, token, settings, now, mode })` reads the Outlook window and the whole
- *   destination calendar, plans the difference and, in `apply` mode, writes it.
+ * - `runSync({ fetch, token, settings, now, mode })` reads the Outlook window and every
+ *   destination calendar in full (the main one and, when configured, the one for excluded
+ *   events), plans the difference and, in `apply` mode, writes it.
  * - `resetMirror({ fetch, settings, mode })` counts or deletes every object carrying the owner
- *   marker.
+ *   marker, in every destination calendar.
  *
  * Both return plain JSON-serialisable results and never throw for expected failures; the
  * `outcome` field says what happened. Bundled for Node as `dist-engine/engine.mjs`
@@ -20,6 +21,7 @@ import {
   inspectCollection,
   listObjects,
 } from './caldav.ts';
+import { sha256Hex } from './crypto.ts';
 import { evaluateGuards, type GuardVerdict } from './guards.ts';
 import { buildDesired } from './mapping.ts';
 import { fieldNeeds, OutlookReadError, readCalendarView } from './outlook.ts';
@@ -38,7 +40,7 @@ import {
   validateSettings,
 } from './settings.ts';
 import { matchAccount, normalizeToken, type TokenAccount, tokenAccount } from './token.ts';
-import type { FetchLike, Settings } from './types.ts';
+import type { DesiredObject, FetchLike, Settings } from './types.ts';
 
 export type Outcome =
   | 'applied'
@@ -81,6 +83,8 @@ export interface RunOptions {
    * desired state still match it, the full destination read and the plan are skipped.
    */
   lastState?: SyncState;
+  /** The same, for the calendar for excluded events. */
+  lastExcludedState?: SyncState;
 }
 
 /** What a run that wrote nothing and failed nowhere leaves behind for the next one. */
@@ -156,7 +160,18 @@ export interface SyncResult {
   skipped?: boolean;
   /** Present after a quiet, error-free apply run: pass it back as `lastState`. */
   state?: SyncState;
+  /** The calendar for excluded events, when one is configured and the run got to it. */
+  excluded?: ExcludedResult;
   errors: OpError[];
+}
+
+/** The second calendar's part of a run; `counts` covers only its own reads and writes. */
+export interface ExcludedResult {
+  counts: SyncCounts;
+  plan?: PlanView;
+  skipped?: boolean;
+  /** Pass it back as `lastExcludedState`. */
+  state?: SyncState;
 }
 
 function emptyCounts(): SyncCounts {
@@ -197,6 +212,55 @@ export function destinationTarget(settings: Settings): CalDavTarget {
     username: settings.username,
     password: settings.password,
   };
+}
+
+/** The calendar for excluded events on the same server, with the same credentials. */
+export function excludedTarget(settings: Settings): CalDavTarget | undefined {
+  if (settings.excludedCaldavUrl === '') return undefined;
+  return { ...destinationTarget(settings), url: normalizeCaldavUrl(settings.excludedCaldavUrl) };
+}
+
+/** Every calendar the settings write to, main first. */
+function targetsOf(settings: Settings): { role: CalendarRole; target: CalDavTarget }[] {
+  const second = excludedTarget(settings);
+  return [
+    { role: 'main', target: destinationTarget(settings) },
+    ...(second ? [{ role: 'excluded' as const, target: second }] : []),
+  ];
+}
+
+export type CalendarRole = 'main' | 'excluded';
+
+/** Prefixes what is said about the second calendar, so a message names the calendar it is about. */
+function about(role: CalendarRole, message: string): string {
+  return role === 'main' ? message : `Calendar for excluded events: ${message}`;
+}
+
+const EMPTY_PLAN: Plan = {
+  creations: [],
+  updates: [],
+  deletions: [],
+  unchanged: 0,
+  conflicts: [],
+  ownCount: 0,
+  ownHrefs: [],
+  foreign: [],
+};
+
+/** One calendar's share of a run, from its read to its writes. */
+interface CalendarPass {
+  role: CalendarRole;
+  target: CalDavTarget;
+  desired: DesiredObject[];
+  last: SyncState | undefined;
+  digestOfDesired: string;
+  counts: SyncCounts;
+  ctag?: string;
+  /** Found unchanged since the last quiet run and not read. */
+  skipped: boolean;
+  plan?: Plan;
+  verdict: GuardVerdict;
+  state?: SyncState;
 }
 
 function view(plan: Plan, includeIcs: boolean): PlanView {
@@ -265,13 +329,14 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     );
   }
 
-  const counts = emptyCounts();
-  const target = destinationTarget(settings);
   const { start, end } = syncWindow(options.now, settings.daysBack, settings.daysAhead);
   const window = { start: start.toISOString(), end: end.toISOString() };
+  const targets = targetsOf(settings);
+  const main = targets[0] as { role: CalendarRole; target: CalDavTarget };
+  const second = targets[1];
 
   try {
-    // Both reads complete before anything is planned, let alone written.
+    // Every read completes before anything is planned, let alone written.
     let read: Awaited<ReturnType<typeof readCalendarView>>;
     try {
       read = await readCalendarView({
@@ -289,76 +354,181 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
       }
       throw error;
     }
-    counts.source = read.rawCount;
     const accountField = account ? { account } : {};
 
-    const { desired, filtered, duplicates } = await buildDesired(
+    const built = await buildDesired(
       read.events,
       settings,
-      target.url,
+      main.target.url,
       options.now,
+      second?.target.url,
     );
-    counts.mirrored = desired.length;
-    counts.filtered = filtered;
-    counts.duplicates = duplicates;
-
-    const digestOfDesired = await desiredDigest(desired, target.url);
-    // One small request tells whether anything in the calendar moved since the last quiet run.
-    let ctag: string | undefined;
-    if (options.mode === 'apply') {
-      try {
-        ctag = await getCtag(options.fetch, target);
-      } catch (error) {
-        if (error instanceof CalDavError) {
-          return {
-            ...fail(
-              'destination-failed',
-              'caldav',
-              error.code,
-              error.message,
-              counts,
-              error.status,
-            ),
-            window,
-            ...accountField,
-          };
-        }
-        throw error;
-      }
+    const passes: CalendarPass[] = [];
+    for (const { role, target } of targets) {
+      const desired = role === 'main' ? built.desired : built.excluded;
+      passes.push({
+        role,
+        target,
+        desired,
+        last: role === 'main' ? options.lastState : options.lastExcludedState,
+        digestOfDesired: await desiredDigest(desired, target.url),
+        counts: { ...emptyCounts(), source: read.rawCount, mirrored: desired.length },
+        skipped: false,
+        verdict: { ok: true },
+      });
     }
-    const last = options.lastState;
-    if (ctag && last && last.ctag === ctag && last.digest === digestOfDesired) {
-      counts.own = last.own;
-      counts.foreign = last.foreign;
-      counts.unchanged = desired.length;
-      return {
-        outcome: 'applied',
-        message: 'Nothing changed since the last sync',
-        window,
-        counts,
-        skipped: true,
-        state: last,
-        ...accountField,
-        errors: [],
-      };
-    }
+    const mainPass = passes[0] as CalendarPass;
+    mainPass.counts.filtered = built.filtered;
+    mainPass.counts.duplicates = built.duplicates;
 
-    let listing: Awaited<ReturnType<typeof listObjects>>;
-    try {
-      listing = await listObjects(options.fetch, target);
-    } catch (error) {
-      if (error instanceof CalDavError) {
+    const acknowledged = new Set(options.acknowledgedOwners);
+    for (const pass of passes) {
+      const failed = await readCalendar(pass, options, acknowledged);
+      if (failed) {
         return {
-          ...fail('destination-failed', 'caldav', error.code, error.message, counts, error.status),
+          ...fail(
+            'destination-failed',
+            'caldav',
+            failed.code,
+            about(pass.role, failed.message),
+            mainPass.counts,
+            failed.status,
+          ),
           window,
           ...accountField,
         };
       }
-      throw error;
     }
-    counts.unreadable = listing.unreadable;
 
-    const plan = await planSync(desired, listing.objects, settings.ownerId);
+    const result: SyncResult = {
+      outcome: 'applied',
+      window,
+      ...accountField,
+      counts: mainPass.counts,
+      errors: [],
+    };
+    const excludedPass = passes[1];
+    const attachExcluded = () => {
+      if (!excludedPass) return;
+      const part: ExcludedResult = { counts: excludedPass.counts };
+      if (excludedPass.plan) part.plan = view(excludedPass.plan, options.includeIcs === true);
+      if (excludedPass.skipped) part.skipped = true;
+      if (excludedPass.state) part.state = excludedPass.state;
+      result.excluded = part;
+    };
+    const keepState = () => {
+      if (mainPass.state) result.state = mainPass.state;
+      attachExcluded();
+    };
+
+    if (passes.every((pass) => pass.skipped)) {
+      result.message = 'Nothing changed since the last sync';
+      result.skipped = true;
+      keepState();
+      return result;
+    }
+
+    const digests = await Promise.all(passes.map((pass) => planDigest(pass.plan ?? EMPTY_PLAN)));
+    const digest =
+      digests.length === 1
+        ? (digests[0] as string)
+        : await sha256Hex(passes.map((pass, i) => `${pass.role} ${digests[i]}`).join('\n'));
+    const held = passes.find((pass) => !pass.verdict.ok);
+    result.outcome = 'preview';
+    result.plan = view(mainPass.plan ?? EMPTY_PLAN, options.includeIcs === true);
+    result.digest = digest;
+    if (held && !held.verdict.ok) {
+      result.guard = { ...held.verdict, message: about(held.role, held.verdict.message) };
+    }
+    attachExcluded();
+    if (options.mode === 'preview') return result;
+
+    const confirmed =
+      options.confirmMassChange === true &&
+      (options.confirmedPlanDigest === undefined || options.confirmedPlanDigest === digest);
+    if (result.guard && !confirmed) {
+      const stale = options.confirmMassChange === true && !confirmed;
+      result.outcome = 'needs-confirmation';
+      result.message = stale
+        ? `${result.guard.message}; the plan changed since it was confirmed`
+        : result.guard.message;
+      return result;
+    }
+
+    const acknowledgedNow = passes.flatMap((pass) =>
+      !pass.verdict.ok && pass.verdict.code === 'other-owner' && pass.plan
+        ? otherOwnersOf(pass.plan.foreign)
+        : [],
+    );
+    if (acknowledgedNow.length > 0) result.acknowledgedOwners = [...new Set(acknowledgedNow)];
+
+    let stopped: string | undefined;
+    for (const pass of passes) {
+      if (!pass.plan) continue;
+      if (stopped) break;
+      const applied = await applyPlan(pass.plan, {
+        fetch: options.fetch,
+        target: pass.target,
+        ownedUrls: new Set(pass.plan.ownHrefs),
+      });
+      pass.counts.created = applied.created;
+      pass.counts.updated = applied.updated;
+      pass.counts.deleted = applied.deleted;
+      pass.counts.errors = applied.errors.length;
+      result.errors.push(
+        ...applied.errors.map((e) => ({ ...e, message: about(pass.role, e.message) })),
+      );
+      stopped = applied.stopped;
+      const quiet = applied.created + applied.updated + applied.deleted === 0;
+      if (pass.ctag && quiet && applied.errors.length === 0 && !applied.stopped) {
+        pass.state = {
+          ctag: pass.ctag,
+          digest: pass.digestOfDesired,
+          own: pass.plan.ownCount,
+          foreign: pass.plan.foreign.length,
+        };
+      }
+    }
+    result.outcome = 'applied';
+    keepState();
+    const first = result.errors[0];
+    if (stopped) {
+      result.message = stopped;
+      result.error = { source: 'caldav', code: 'auth', message: stopped, status: 401 };
+    } else if (first) {
+      result.message = first.message;
+    }
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unexpected error';
+    return { ...fail('failed', 'engine', 'unexpected', message), window };
+  }
+}
+
+/**
+ * Reads one calendar and plans it: in apply mode its change tag first, and when that and the
+ * desired state match the last quiet run, nothing more. Returns the failure that stops the run.
+ */
+async function readCalendar(
+  pass: CalendarPass,
+  options: RunOptions,
+  acknowledged: Set<string>,
+): Promise<CalDavError | undefined> {
+  try {
+    if (options.mode === 'apply') pass.ctag = await getCtag(options.fetch, pass.target);
+    const last = pass.last;
+    if (pass.ctag && last && last.ctag === pass.ctag && last.digest === pass.digestOfDesired) {
+      pass.skipped = true;
+      pass.state = last;
+      pass.counts.own = last.own;
+      pass.counts.foreign = last.foreign;
+      pass.counts.unchanged = pass.desired.length;
+      return undefined;
+    }
+    const listing = await listObjects(options.fetch, pass.target);
+    const plan = await planSync(pass.desired, listing.objects, options.settings.ownerId);
+    const { counts } = pass;
+    counts.unreadable = listing.unreadable;
     counts.own = plan.ownCount;
     counts.foreign = plan.foreign.length;
     counts.create = plan.creations.length;
@@ -366,72 +536,19 @@ export async function runSync(options: RunOptions): Promise<SyncResult> {
     counts.delete = plan.deletions.length;
     counts.unchanged = plan.unchanged;
     counts.conflicts = plan.conflicts.length;
-
-    const digest = await planDigest(plan);
-    const acknowledged = new Set(options.acknowledgedOwners);
-    const verdict = evaluateGuards({
-      sourceCount: read.rawCount,
+    pass.plan = plan;
+    pass.verdict = evaluateGuards({
+      sourceCount: counts.source,
       deletions: plan.deletions.length,
       ownCount: plan.ownCount,
       creations: plan.creations.length,
       foreignCount: plan.foreign.length,
       otherOwners: otherOwnersOf(plan.foreign).filter((id) => !acknowledged.has(id)),
     });
-    const result: SyncResult = {
-      outcome: 'preview',
-      window,
-      ...accountField,
-      counts,
-      plan: view(plan, options.includeIcs === true),
-      digest,
-      errors: [],
-    };
-    if (!verdict.ok) result.guard = verdict;
-    if (options.mode === 'preview') return result;
-
-    const confirmed =
-      options.confirmMassChange === true &&
-      (options.confirmedPlanDigest === undefined || options.confirmedPlanDigest === digest);
-    if (!verdict.ok && !confirmed) {
-      const stale = options.confirmMassChange === true && !confirmed;
-      result.outcome = 'needs-confirmation';
-      result.message = stale
-        ? `${verdict.message}; the plan changed since it was confirmed`
-        : verdict.message;
-      return result;
-    }
-
-    if (!verdict.ok && verdict.code === 'other-owner') {
-      result.acknowledgedOwners = otherOwnersOf(plan.foreign);
-    }
-    const ownedUrls = new Set(plan.ownHrefs);
-    const applied = await applyPlan(plan, { fetch: options.fetch, target, ownedUrls });
-    counts.created = applied.created;
-    counts.updated = applied.updated;
-    counts.deleted = applied.deleted;
-    counts.errors = applied.errors.length;
-    result.outcome = 'applied';
-    result.errors = applied.errors;
-    const quiet = applied.created + applied.updated + applied.deleted === 0;
-    if (ctag && quiet && applied.errors.length === 0 && !applied.stopped) {
-      result.state = {
-        ctag,
-        digest: digestOfDesired,
-        own: plan.ownCount,
-        foreign: plan.foreign.length,
-      };
-    }
-    const first = applied.errors[0];
-    if (applied.stopped) {
-      result.message = applied.stopped;
-      result.error = { source: 'caldav', code: 'auth', message: applied.stopped, status: 401 };
-    } else if (first) {
-      result.message = first.message;
-    }
-    return result;
+    return undefined;
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unexpected error';
-    return { ...fail('failed', 'engine', 'unexpected', message, counts), window };
+    if (error instanceof CalDavError) return error;
+    throw error;
   }
 }
 
@@ -442,7 +559,7 @@ export interface CheckResult {
   name?: string;
 }
 
-/** Asks the server what the configured URL is, without writing anything. */
+/** Asks the server what the configured URLs are, without writing anything. */
 export async function checkDestination(options: {
   fetch: FetchLike;
   settings: Settings;
@@ -451,19 +568,34 @@ export async function checkDestination(options: {
   if (problems.length > 0) {
     return { outcome: 'invalid-settings', message: problems.join('; ') };
   }
+  const names: (string | undefined)[] = [];
+  for (const { role, target } of targetsOf(options.settings)) {
+    const checked = await checkCalendar(options.fetch, target);
+    if ('outcome' in checked) return { ...checked, message: about(role, checked.message) };
+    names.push(checked.name);
+  }
+  const [name, excludedName] = names;
+  const calendar = (n: string | undefined) => (n ? `calendar '${n}'` : 'the calendar');
+  const message =
+    names.length === 1
+      ? `Connected to ${calendar(name)}`
+      : `Connected to ${calendar(name)}, and to ${calendar(excludedName)} for excluded events`;
+  return { outcome: 'ok', message, ...(name ? { name } : {}) };
+}
+
+async function checkCalendar(
+  fetchImpl: FetchLike,
+  target: CalDavTarget,
+): Promise<{ name?: string } | Omit<CheckResult, 'name'>> {
   try {
-    const info = await inspectCollection(options.fetch, destinationTarget(options.settings));
+    const info = await inspectCollection(fetchImpl, target);
     if (!info.isCalendar) {
       return { outcome: 'not-a-calendar', message: 'This URL is not a calendar collection' };
     }
     if (!info.holdsEvents) {
       return { outcome: 'not-a-calendar', message: 'This calendar does not hold events' };
     }
-    return {
-      outcome: 'ok',
-      message: info.name ? `Connected to calendar '${info.name}'` : 'Connected to the calendar',
-      ...(info.name ? { name: info.name } : {}),
-    };
+    return info.name ? { name: info.name } : {};
   } catch (error) {
     if (error instanceof CalDavError) {
       const outcome =
@@ -500,7 +632,10 @@ export interface ResetResult {
   errors: OpError[];
 }
 
-/** Deletes every object carrying the chosen owner marker, and nothing else. */
+/**
+ * Deletes every object carrying the chosen owner marker, and nothing else, in every configured
+ * calendar. All of them are read before anything is deleted; counts are totals.
+ */
 export async function resetMirror(options: ResetOptions): Promise<ResetResult> {
   const result: ResetResult = {
     outcome: 'counted',
@@ -515,49 +650,61 @@ export async function resetMirror(options: ResetOptions): Promise<ResetResult> {
   if (!OWNER_ID_PATTERN.test(ownerId)) problems.push('Owner id is not valid');
   if (problems.length > 0)
     return { ...result, outcome: 'invalid-settings', message: problems.join('; ') };
-  const target = destinationTarget(options.settings);
+  const plans: { target: CalDavTarget; plan: Plan }[] = [];
+  let role: CalendarRole = 'main';
   try {
-    const listing = await listObjects(options.fetch, target);
-    const { own, foreign } = await classifyRemote(listing.objects, ownerId);
-    result.own = own.length;
-    result.foreign = foreign.length;
-    for (const object of foreign) {
-      if (!object.owner) continue;
-      const entry = result.otherOwners.find((o) => o.id === object.owner);
-      if (entry) entry.count += 1;
-      else result.otherOwners.push({ id: object.owner, count: 1 });
+    for (const calendar of targetsOf(options.settings)) {
+      role = calendar.role;
+      const listing = await listObjects(options.fetch, calendar.target);
+      const { own, foreign } = await classifyRemote(listing.objects, ownerId);
+      result.own += own.length;
+      result.foreign += foreign.length;
+      for (const object of foreign) {
+        if (!object.owner) continue;
+        const entry = result.otherOwners.find((o) => o.id === object.owner);
+        if (entry) entry.count += 1;
+        else result.otherOwners.push({ id: object.owner, count: 1 });
+      }
+      plans.push({
+        target: calendar.target,
+        plan: {
+          ...EMPTY_PLAN,
+          ownCount: own.length,
+          ownHrefs: own.map((o) => o.href),
+          foreign,
+          deletions: own.map((o) => ({
+            kind: 'delete',
+            uid: o.uid,
+            href: o.href,
+            etag: o.etag,
+            summary: o.summary,
+            start: o.start,
+          })),
+        },
+      });
     }
     if (options.mode === 'count') return result;
-    if (options.confirmedCount !== own.length) {
+    if (options.confirmedCount !== result.own) {
       return {
         ...result,
         outcome: 'refused',
-        message: `The calendar now holds ${own.length} events of this owner id, not ${options.confirmedCount ?? 'the confirmed number'}`,
+        message: `The calendars now hold ${result.own} events of this owner id, not ${options.confirmedCount ?? 'the confirmed number'}`,
       };
     }
-    const plan: Plan = {
-      creations: [],
-      updates: [],
-      conflicts: [],
-      unchanged: 0,
-      ownCount: own.length,
-      ownHrefs: own.map((o) => o.href),
-      foreign,
-      deletions: own.map((o) => ({
-        kind: 'delete',
-        uid: o.uid,
-        href: o.href,
-        etag: o.etag,
-        summary: o.summary,
-        start: o.start,
-      })),
-    };
-    const ownedUrls = new Set(plan.ownHrefs);
-    const applied = await applyPlan(plan, { fetch: options.fetch, target, ownedUrls });
-    return { ...result, outcome: 'reset', deleted: applied.deleted, errors: applied.errors };
+    for (const { target, plan } of plans) {
+      const applied = await applyPlan(plan, {
+        fetch: options.fetch,
+        target,
+        ownedUrls: new Set(plan.ownHrefs),
+      });
+      result.deleted += applied.deleted;
+      result.errors.push(...applied.errors);
+      if (applied.stopped) break;
+    }
+    return { ...result, outcome: 'reset' };
   } catch (error) {
     if (error instanceof CalDavError) {
-      return { ...result, outcome: 'destination-failed', message: error.message };
+      return { ...result, outcome: 'destination-failed', message: about(role, error.message) };
     }
     const message = error instanceof Error ? error.message : 'Unexpected error';
     return { ...result, outcome: 'failed', message };

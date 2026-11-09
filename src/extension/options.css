@@ -18,6 +18,10 @@ main {
 h1 {
   margin-bottom: 0.2rem;
 }
+#plan h3 {
+  font-size: 13px;
+  margin: 0.8rem 0 0.3rem;
+}
 h2 {
   margin-top: 2rem;
   border-bottom: 1px solid var(--border);

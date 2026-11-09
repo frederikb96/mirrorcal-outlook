@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { saveSettingsFlow } from '../src/extension/save.ts';
 import {
   loadBackoff,
@@ -12,7 +12,7 @@ import {
 import { FakeCalDav, routeFetch } from './helpers/fake-caldav.ts';
 import { installFakeChrome } from './helpers/fake-chrome.ts';
 import { FakeOutlook } from './helpers/fake-outlook.ts';
-import { sampleWeek, TOKEN, testSettings } from './helpers/fixtures.ts';
+import { NOW, sampleWeek, TOKEN, testSettings } from './helpers/fixtures.ts';
 
 const realFetch = globalThis.fetch;
 let fake: ReturnType<typeof installFakeChrome>;
@@ -20,6 +20,8 @@ let outlook: FakeOutlook;
 let dav: FakeCalDav;
 
 beforeEach(async () => {
+  // The fixture week sits inside the sync window only around NOW.
+  setSystemTime(NOW);
   fake = installFakeChrome();
   outlook = new FakeOutlook(TOKEN, sampleWeek());
   dav = new FakeCalDav();
@@ -32,6 +34,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  setSystemTime();
   globalThis.fetch = realFetch;
 });
 
