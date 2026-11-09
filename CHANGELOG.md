@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
 ### Added
 
 - Optional calendar for excluded events: events left out by the title filters or availability exclusions are mirrored into a second calendar on the same server instead of being dropped. Both calendars are read and planned before anything is written, a held-back plan in either holds the whole run, and Reset mirror covers both.
