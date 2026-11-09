@@ -34,7 +34,7 @@ import {
   saveSyncState,
 } from './storage.ts';
 
-type SyncRun = { record: RunRecord; plan?: PlanView };
+type SyncRun = { record: RunRecord; plan?: PlanView; excludedPlan?: PlanView };
 
 /** One flight for everything that touches the destination, so a reset never overlaps a sync. */
 const flight = createSingleFlight<SyncRun | ResetResult>();
@@ -87,6 +87,7 @@ function recordFromResult(trigger: Trigger, startedAt: Date, result: SyncResult)
   const rejected = passwordRejected(result);
   const record = recordOf(trigger, startedAt, rejected ? 'credentials-rejected' : result.outcome, {
     counts: result.counts,
+    ...(result.excluded ? { excludedCounts: result.excluded.counts } : {}),
   });
   const message = rejected ? PASSWORD_REJECTED_MESSAGE : (result.message ?? result.error?.message);
   if (message) record.message = message;
@@ -107,16 +108,16 @@ export interface SyncRequest {
   confirm?: { digest: string };
 }
 
-async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan?: PlanView }> {
+async function syncOnce(request: SyncRequest): Promise<SyncRun> {
   const startedAt = new Date();
   const preview = request.mode === 'preview';
-  const finish = async (record: RunRecord, plan?: PlanView) => {
+  const finish = async (record: RunRecord, plans: Omit<SyncRun, 'record'> = {}) => {
     // Previews and runs that were never attempted are not worth remembering.
     if (!preview && record.outcome !== 'skipped') {
       const latest = record.outcome === 'disabled' ? record : await recordRun(record);
       await showAttention(latest);
     }
-    return plan ? { record, plan } : { record };
+    return { record, ...plans };
   };
 
   const { settings, stored } = await loadSettings();
@@ -155,6 +156,7 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
   }
 
   const lastState = preview ? undefined : await loadSyncState();
+  const lastExcludedState = preview ? undefined : await loadSyncState('excluded');
   const pinned = await loadAccount();
   const result = await runSync({
     fetch: doFetch,
@@ -165,6 +167,7 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
     now: new Date(),
     mode: request.mode,
     ...(lastState ? { lastState } : {}),
+    ...(lastExcludedState ? { lastExcludedState } : {}),
     ...(request.confirm
       ? { confirmMassChange: true, confirmedPlanDigest: request.confirm.digest }
       : {}),
@@ -175,7 +178,10 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
   }
   const record = recordFromResult(request.trigger, startedAt, result);
   if (!preview) {
-    if (result.outcome === 'applied') await saveSyncState(result.state);
+    if (result.outcome === 'applied') {
+      await saveSyncState(result.state);
+      await saveSyncState(result.excluded?.state, 'excluded');
+    }
     if (record.outcome === 'credentials-rejected') await savePasswordRejected(true);
     else if (result.outcome === 'applied') await savePasswordRejected(false);
     if (result.outcome === 'applied' && result.account && !pinned)
@@ -189,9 +195,15 @@ async function syncOnce(request: SyncRequest): Promise<{ record: RunRecord; plan
   }
   if (preview && result.guard)
     record.guard = { code: result.guard.code, message: result.guard.message };
+  const showPlan = preview || result.outcome === 'needs-confirmation';
   return finish(
     record,
-    preview || result.outcome === 'needs-confirmation' ? result.plan : undefined,
+    showPlan
+      ? {
+          ...(result.plan ? { plan: result.plan } : {}),
+          ...(result.excluded?.plan ? { excludedPlan: result.excluded.plan } : {}),
+        }
+      : {},
   );
 }
 

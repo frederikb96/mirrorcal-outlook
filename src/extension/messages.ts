@@ -27,6 +27,8 @@ export interface RunRecord {
   /** Kind of failure (error code and HTTP status): runs are repeats of each other by this, not by wording. */
   failure?: string;
   counts?: SyncCounts;
+  /** The calendar for excluded events' share, when one is configured. */
+  excludedCounts?: SyncCounts;
   guard?: { code: string; message: string };
   digest?: string;
   /** How many identical consecutive runs this entry stands for. */
@@ -61,6 +63,8 @@ export interface SyncResponse {
   busy: boolean;
   record?: RunRecord;
   plan?: PlanView;
+  /** The plan for the calendar for excluded events. */
+  excludedPlan?: PlanView;
 }
 
 export interface ResetResponse {

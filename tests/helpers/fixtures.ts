@@ -3,6 +3,8 @@ import type { Settings } from '../../src/core/types.ts';
 
 export const NOW = new Date('2026-10-05T12:00:00Z');
 export const COLLECTION = 'https://dav.example.test/remote.php/dav/calendars/alice/work/';
+export const EXCLUDED_COLLECTION =
+  'https://dav.example.test/remote.php/dav/calendars/alice/work-other/';
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {

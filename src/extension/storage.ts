@@ -1,4 +1,4 @@
-import type { SyncState } from '../core/engine.ts';
+import type { CalendarRole, SyncState } from '../core/engine.ts';
 import { mergeWithDefaults } from '../core/settings.ts';
 import type { CapturedToken, TokenAccount } from '../core/token.ts';
 import type { Settings } from '../core/types.ts';
@@ -8,6 +8,7 @@ const SETTINGS_KEY = 'settings';
 const STATUS_KEY = 'status';
 const TOKEN_KEY = 'outlookToken';
 const STATE_KEY = 'syncState';
+const EXCLUDED_STATE_KEY = 'excludedSyncState';
 const ACCOUNT_KEY = 'account';
 const REJECTED_PASSWORD_KEY = 'credentialsRejected';
 const BACKOFF_KEY = 'backoff';
@@ -132,6 +133,10 @@ export async function loadStatus(): Promise<StoredStatus> {
   return { log: [], ...stored };
 }
 
+/** Failed writes of a run, in both calendars. */
+export const errorCount = (record: RunRecord) =>
+  (record.counts?.errors ?? 0) + (record.excludedCounts?.errors ?? 0);
+
 /** Two runs that said and did the same thing are one log entry with a repeat count. */
 function sameOutcome(a: RunRecord, b: RunRecord): boolean {
   return (
@@ -139,7 +144,7 @@ function sameOutcome(a: RunRecord, b: RunRecord): boolean {
     a.outcome === b.outcome &&
     (a.failure ?? a.message) === (b.failure ?? b.message) &&
     a.digest === b.digest &&
-    (a.counts?.errors ?? 0) === (b.counts?.errors ?? 0)
+    errorCount(a) === errorCount(b)
   );
 }
 
@@ -148,7 +153,7 @@ export async function recordRun(record: RunRecord): Promise<RunRecord> {
   const status = await loadStatus();
   const [latest, ...older] = status.log;
   const quiet = (r: RunRecord) =>
-    !r.counts || r.counts.created + r.counts.updated + r.counts.deleted === 0;
+    [r.counts, r.excludedCounts].every((c) => !c || c.created + c.updated + c.deleted === 0);
   if (latest && quiet(latest) && quiet(record) && sameOutcome(latest, record)) {
     status.log = [
       { ...latest, finishedAt: record.finishedAt, repeats: latest.repeats + 1 },
@@ -158,20 +163,28 @@ export async function recordRun(record: RunRecord): Promise<RunRecord> {
     status.log = [record, ...status.log].slice(0, LOG_LIMIT);
   }
   status.lastRun = status.log[0] as RunRecord;
-  if (record.outcome === 'applied' && !record.counts?.errors) {
+  if (record.outcome === 'applied' && errorCount(record) === 0) {
     status.lastSuccessAt = record.finishedAt;
   }
   await chrome.storage.local.set({ [STATUS_KEY]: status });
   return status.lastRun;
 }
 
-/** Change tag and digest from the last quiet run; lets the next run skip reading the calendar. */
-export async function loadSyncState(): Promise<SyncState | undefined> {
-  const items = await chrome.storage.local.get(STATE_KEY);
-  return items[STATE_KEY] as SyncState | undefined;
+const stateKey = (role: CalendarRole) => (role === 'main' ? STATE_KEY : EXCLUDED_STATE_KEY);
+
+/**
+ * Change tag and digest from the last quiet run of one calendar; lets the next run skip reading
+ * that calendar.
+ */
+export async function loadSyncState(role: CalendarRole = 'main'): Promise<SyncState | undefined> {
+  const items = await chrome.storage.local.get(stateKey(role));
+  return items[stateKey(role)] as SyncState | undefined;
 }
 
-export async function saveSyncState(state: SyncState | undefined): Promise<void> {
-  if (state) await chrome.storage.local.set({ [STATE_KEY]: state });
-  else await chrome.storage.local.remove(STATE_KEY);
+export async function saveSyncState(
+  state: SyncState | undefined,
+  role: CalendarRole = 'main',
+): Promise<void> {
+  if (state) await chrome.storage.local.set({ [stateKey(role)]: state });
+  else await chrome.storage.local.remove(stateKey(role));
 }

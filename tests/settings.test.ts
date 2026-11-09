@@ -157,3 +157,33 @@ describe('Outlook host spellings', () => {
     }
   });
 });
+
+describe('calendar for excluded events', () => {
+  const at = (excludedCaldavUrl: string) =>
+    validateDestination(testSettings({ excludedCaldavUrl }));
+
+  test('is optional and off by default', () => {
+    expect(DEFAULT_SETTINGS.excludedCaldavUrl).toBe('');
+    expect(at('')).toEqual([]);
+    expect(at('https://dav.example.test/remote.php/dav/calendars/alice/other/')).toEqual([]);
+  });
+
+  test('must be another calendar on the same server', () => {
+    expect(at('https://elsewhere.example.test/remote.php/dav/calendars/alice/other/')).toEqual([
+      'The calendar for excluded events must be on the same server as the calendar',
+    ]);
+    const different = ['The calendar for excluded events must be a different calendar'];
+    expect(at('https://dav.example.test/remote.php/dav/calendars/alice/work')).toEqual(different);
+    expect(at('https://dav.example.test/remote.php/dav/calendars/alice/')).toEqual(different);
+    expect(at('https://dav.example.test/remote.php/dav/calendars/alice/work/sub/')).toEqual(
+      different,
+    );
+  });
+
+  test('is checked like the calendar URL', () => {
+    expect(at('not a url')).toEqual(['Calendar URL for excluded events is not a valid URL']);
+    expect(at('https://outlook.office.com/x/')).toContain(
+      'Calendar URL for excluded events must not point at Outlook',
+    );
+  });
+});

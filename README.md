@@ -4,16 +4,16 @@
 [![Release](https://img.shields.io/github/v/release/frederikb96/mirrorcal-outlook)](https://github.com/frederikb96/mirrorcal-outlook/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Manifest V3 browser extension for Chromium and Edge. It reads your calendar from Outlook on the web and mirrors it, one way, into a CalDAV calendar such as one on Nextcloud. That puts work meetings into the calendar app you already use, without any Outlook account setup on the device.
+A Manifest V3 browser extension for Chromium and Edge. It reads your calendar from Outlook on the web and mirrors it, one way, into a CalDAV calendar such as one on Nextcloud. That puts work meetings into the calendar app you already use, without any Outlook account setup on the device. Events you filter out can go into a second calendar instead of being dropped.
 
 ## How it works
 
 - While you are signed in to Outlook on the web, the extension notes the access token the Outlook page itself uses and keeps it in memory only. Only requests sent by the Outlook page count, and once a sync has succeeded the mirror stays bound to that account: tokens of any other account or tenant are ignored (the status counts them, so a switched account is not silent).
 - On a schedule, at browser start and on demand, it reads the calendar view for a time window from Outlook.
-- It reads every object in the destination calendar, compares both sides and sends only the creations, updates and deletions that are needed. A second run over unchanged data writes nothing and, while the calendar's change tag is unchanged, only asks for that tag instead of reading the calendar.
+- It reads every object in the destination calendar (and in the calendar for excluded events, when one is set), compares both sides and sends only the creations, updates and deletions that are needed. A second run over unchanged data writes nothing and, while the calendar's change tag is unchanged, only asks for that tag instead of reading the calendar.
 - Outlook is only ever read. The extension has no code path that sends anything else to Outlook.
 
-The destination calendar belongs to the mirror: edits made there are overwritten by the next sync. Use a calendar that nothing else writes to.
+The destination calendars belong to the mirror: edits made there are overwritten by the next sync. Use calendars that nothing else writes to.
 
 ## Install
 
@@ -37,21 +37,22 @@ Open the extension's options page.
 
 - **Enabled.** The master switch. While it is off the extension reads nothing and writes nothing.
 - **CalDAV calendar URL, user and app password.** The URL is the collection of the destination calendar, for example `https://host/remote.php/dav/calendars/<user>/<calendar>/`. Saving asks the browser for permission to reach that server, asks the server what the URL is (it must be a calendar that holds events; the page shows its name) and then starts a sync, so the result is visible at once. An empty password field keeps the stored password, but only for the server it was entered for: pointing the URL at another server requires entering the password again, and the access to the old server is released.
+- **Calendar URL for excluded events.** Optional. The events that the title filters and availability exclusions leave out are mirrored into this second calendar instead, with the same field policies and owner id. It has to be another calendar on the same server, reached with the same user and password; saving checks it like the first. Empty means excluded events are not mirrored at all.
 - **Time window.** Days back and days ahead, relative to now.
 - **Sync interval.** How often the scheduled sync runs.
 - **Outlook host.** Which of the Outlook web hosts the calendar is read from (`outlook.cloud.microsoft`, `outlook.office.com`, `outlook.office365.com`). Pick the one the Outlook tab uses.
 - **Field policies.** Title, description and location can each be copied, dropped or replaced with fixed text. The replacement only stands in where the event has that field; an event without a description or location stays without one. Attendees can be copied or dropped. By default the title is copied and everything else is dropped. Copying descriptions reads every event body on each sync.
-- **Private events.** Events that Outlook marks private, personal or confidential are written with a matching `CLASS`, so calendar apps and sharing treat them as private. By default they get the title "Private" and no description, location or attendees. They can instead be copied as they are, replaced with another text, or not mirrored at all.
-- **Title filters.** Events whose title matches an entry are not mirrored. Matching ignores case and surrounding whitespace, is exact by default, and `*` is a wildcard. Adding a filter removes the matching copies on the next sync, removing it brings them back.
-- **Availability.** Events with a checked availability (free, tentative, busy, out of office, working elsewhere, unknown) are not mirrored.
+- **Private events.** Events that Outlook marks private, personal or confidential are written with a matching `CLASS`, so calendar apps and sharing treat them as private. By default they get the title "Private" and no description, location or attendees. They can instead be copied as they are, replaced with another text, or not mirrored at all (in neither calendar).
+- **Title filters.** Events whose title matches an entry are left out of the calendar: mirrored into the calendar for excluded events if one is set, otherwise not at all. Matching ignores case and surrounding whitespace, is exact by default, and `*` is a wildcard. Adding a filter moves the matching events out on the next sync, removing it brings them back.
+- **Availability.** Events with a checked availability (free, tentative, busy, out of office, working elsewhere, unknown) are left out the same way.
 - **Owner id.** A constant label written into every mirrored event. Only events that carry it are ever modified or deleted by the extension. Events without it, and events of another owner id, are never touched; the status counts them. Keep the id identical, together with filters and policies, on every browser that mirrors the same calendar. Changing the id leaves the events of the old id behind and holds the next sync back until it is confirmed; confirming once lets later syncs create events next to them, and "Remove another owner's events" deletes them.
 
 The page also shows the current status: syncing state, the mirrored account, Outlook session and its expiry, the last run with its counts and, when something failed, the reason and how many writes failed, plus a short history. It has these buttons:
 
 - **Sync now** runs a sync immediately.
 - **Preview changes** computes the plan without writing anything.
-- **Reset mirror** deletes all events that carry your owner id, after showing how many that are. While syncing is on, the next run recreates them (and asks for confirmation if other objects remain); switch syncing off to stop mirroring.
-- **Remove another owner's events** lists the other owner ids found in the calendar and deletes the events of the one you pick, after showing how many that are. Objects without any mirror owner id are never deleted.
+- **Reset mirror** deletes all events that carry your owner id, in both calendars, after showing how many that are. While syncing is on, the next run recreates them (and asks for confirmation if other objects remain); switch syncing off to stop mirroring.
+- **Remove another owner's events** lists the other owner ids found in the calendars and deletes the events of the one you pick, after showing how many that are. Objects without any mirror owner id are never deleted.
 - **Forget account** releases the account binding and drops the stored Outlook session; the next session the Outlook page shows is mirrored and bound after its first successful sync. A reset releases it as well.
 
 The toolbar icon shows a badge when something needs you: a held-back plan, a rejected password, a missing permission, an invalid setting, or a problem that keeps repeating (no Outlook session, failing reads or writes). The tooltip says which.
@@ -60,7 +61,7 @@ The toolbar icon shows a badge when something needs you: a held-back plan, a rej
 
 - Outlook is accessed read-only. The only request the extension can build towards Outlook is the calendar view read, and a test checks that. An Outlook host is refused as the calendar server.
 - A sync stops before any write if the Outlook read fails, returns something unexpected or is incomplete. Nothing is deleted on a partial read.
-- A plan that would remove everything, or a large share of the mirrored events, is refused until you confirm that run on the options page. Changing a filter can legitimately cause this, so the page shows the preview and asks once. Creating events is held back the same way when the calendar already holds events of another owner id, or only events that are not this mirror's (usually the wrong calendar).
+- Every calendar is read before anything is written, and a run that fails to read either writes nothing. A plan that would remove everything, or a large share of the mirrored events, of either calendar is refused until you confirm that run on the options page; until then neither calendar is changed. Changing a filter can legitimately cause this, so the page shows the preview and asks once. Creating events is held back the same way when the calendar already holds events of another owner id, or only events that are not this mirror's (usually the wrong calendar).
 - Without a valid token the status asks you to open Outlook, and nothing is deleted.
 - After the calendar server rejects the password, scheduled runs make no requests until the settings are saved again; a manual sync still tries once. A failing run that repeats unchanged three times is then retried at most hourly by the schedule.
 - The CalDAV app password is stored unencrypted in the browser's extension storage on your machine. A Nextcloud app password can be revoked but gives access to the whole account, not just one calendar. It is only sent to the server it was entered for. The Outlook token is held in session storage only and is gone when the browser restarts.

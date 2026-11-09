@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test';
 import type { Settings } from '../src/core/types.ts';
 import { captureToken, resetCaptureMemory } from '../src/extension/capture.ts';
 import { keepAliveWhile, runResetFlight, runSyncFlight } from '../src/extension/runner.ts';
@@ -16,7 +16,7 @@ import {
 import { FakeCalDav, routeFetch } from './helpers/fake-caldav.ts';
 import { installFakeChrome } from './helpers/fake-chrome.ts';
 import { FakeOutlook } from './helpers/fake-outlook.ts';
-import { makeJwt, outlookId, rawEvent, sampleWeek, testSettings } from './helpers/fixtures.ts';
+import { makeJwt, NOW, outlookId, rawEvent, sampleWeek, testSettings } from './helpers/fixtures.ts';
 
 const realFetch = globalThis.fetch;
 const FAR_FUTURE = 4_000_000_000;
@@ -28,6 +28,8 @@ let outlook: FakeOutlook;
 let dav: FakeCalDav;
 
 beforeEach(() => {
+  // The fixture week sits inside the sync window only around NOW.
+  setSystemTime(NOW);
   fake = installFakeChrome();
   resetCaptureMemory();
   outlook = new FakeOutlook(TOKEN, sampleWeek());
@@ -39,6 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setSystemTime();
   globalThis.fetch = realFetch;
 });
 

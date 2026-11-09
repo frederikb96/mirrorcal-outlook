@@ -43,10 +43,18 @@
         <label class="switch"><input id="enabled" type="checkbox" /> Syncing enabled</label>
 
         <fieldset>
-          <legend>Calendar server</legend>
+          <legend>Calendars</legend>
           <label>Calendar URL
             <input id="caldavUrl" type="url" placeholder="https://host/remote.php/dav/calendars/user/name/" />
           </label>
+          <label>Calendar URL for excluded events (optional)
+            <input id="excludedCaldavUrl" type="url" placeholder="https://host/remote.php/dav/calendars/user/other/" />
+          </label>
+          <p class="hint">
+            The events the filters under <em>Excluded events</em> leave out are mirrored into this
+            second calendar instead, with the same policies. It must be on the same server and is
+            reached with the same account. Leave it empty to not mirror them at all.
+          </p>
           <label>User name <input id="username" type="text" /></label>
           <label>App password
             <input id="password" type="password" autocomplete="new-password" />
@@ -82,14 +90,16 @@
           <div class="policy" data-field="privateEvents"><span>Private events</span></div>
           <p class="hint">
             Events Outlook marks private, personal or confidential are always written with a
-            private flag. Unless they are copied, only the replacement title is kept. Time, all-day
-            flag and availability are always mirrored. Copying descriptions reads every event body
-            on each sync.
+            private flag. Unless they are copied, only the replacement title is kept; set to
+            <em>Do not mirror</em>, they appear in neither calendar. Time, all-day flag and
+            availability are always mirrored. The policies apply to both calendars. Copying
+            descriptions reads every event body on each sync.
           </p>
         </fieldset>
 
         <fieldset>
-          <legend>Not mirrored</legend>
+          <legend>Excluded events</legend>
+          <p id="excluded-where" class="hint"></p>
           <label>Titles, one per line
             <textarea id="titleFilters" rows="5" placeholder="Sport&#10;Mittagessen&#10;Team*"></textarea>
           </label>

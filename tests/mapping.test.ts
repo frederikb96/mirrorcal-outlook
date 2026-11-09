@@ -3,7 +3,7 @@ import { unfoldLines } from '../src/core/ics.ts';
 import {
   buildDesired,
   compileTitleFilter,
-  isExcluded,
+  exclusionOf,
   mapEvent,
   mirrorUid,
   type TitleMatcher,
@@ -197,13 +197,15 @@ describe('title filters', () => {
   test('filters use the original title, not the replacement', () => {
     const s = testSettings({ titleFilters: ['Planning'] });
     s.policies.title = { mode: 'replace', text: 'Meeting' };
-    expect(isExcluded(source(), s, [compileTitleFilter('Planning') as TitleMatcher])).toBe(true);
+    expect(exclusionOf(source(), s, [compileTitleFilter('Planning') as TitleMatcher])).toBe(
+      'filtered',
+    );
   });
 
   test('availability exclusion', () => {
     const s = testSettings({ excludeShowAs: ['Free'] });
-    expect(isExcluded(source({ showAs: 'Free' }), s, [])).toBe(true);
-    expect(isExcluded(source({ showAs: 'Busy' }), s, [])).toBe(false);
+    expect(exclusionOf(source({ showAs: 'Free' }), s, [])).toBe('filtered');
+    expect(exclusionOf(source({ showAs: 'Busy' }), s, [])).toBeUndefined();
   });
 
   test('excluded events are not rendered and are counted', async () => {
@@ -305,8 +307,8 @@ describe('private events', () => {
   test('skip excludes them and only them', () => {
     const s = testSettings();
     s.policies.privateEvents = { mode: 'skip' };
-    expect(isExcluded(secret('Private'), s, [])).toBe(true);
-    expect(isExcluded(secret('Normal'), s, [])).toBe(false);
+    expect(exclusionOf(secret('Private'), s, [])).toBe('private');
+    expect(exclusionOf(secret('Normal'), s, [])).toBeUndefined();
   });
 });
 

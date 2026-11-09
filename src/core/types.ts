@@ -66,6 +66,11 @@ export type AttendeePolicy = 'copy' | 'drop';
 export interface Settings {
   enabled: boolean;
   caldavUrl: string;
+  /**
+   * Optional second calendar on the same server. Events the filters and availability exclusions
+   * leave out of the main calendar are mirrored here instead; empty means they are not mirrored.
+   */
+  excludedCaldavUrl: string;
   username: string;
   password: string;
   ownerId: string;

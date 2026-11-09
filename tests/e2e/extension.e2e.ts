@@ -21,10 +21,11 @@ import { join, resolve } from 'node:path';
 import { type BrowserContext, chromium, type Page, type Worker } from 'playwright-core';
 import type { StatusResponse } from '../../src/extension/messages.ts';
 import { extensionIdFromKey } from '../helpers/extension-id.ts';
-import { FakeCalDav } from '../helpers/fake-caldav.ts';
+import { FakeCalDav, routeCalendars } from '../helpers/fake-caldav.ts';
 import { FakeOutlook } from '../helpers/fake-outlook.ts';
 import {
   COLLECTION,
+  EXCLUDED_COLLECTION,
   makeJwt,
   outlookId,
   rawEvent,
@@ -42,6 +43,12 @@ const TOKEN = makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
 
 const outlook = new FakeOutlook(TOKEN, sampleWeek());
 const dav = new FakeCalDav();
+const excludedDav = new FakeCalDav(EXCLUDED_COLLECTION);
+excludedDav.collection = { kind: 'calendar', name: 'Other' };
+const davFetch = routeCalendars(dav, excludedDav);
+// The browser runs on the real clock and the fixture week is fixed: the window reaches back to it.
+const settings = (overrides: Parameters<typeof testSettings>[0] = {}) =>
+  testSettings({ daysBack: 730, ...overrides });
 const pageRequests: string[] = [];
 
 let tmp: string;
@@ -137,7 +144,7 @@ beforeAll(async () => {
       if (host === DAV_HOST) {
         const withBody = ['PUT', 'REPORT', 'PROPFIND'].includes(req.method);
         const body = withBody ? await req.text() : undefined;
-        return dav.fetch(external, {
+        return davFetch(external, {
           method: req.method,
           headers,
           ...(body === undefined ? {} : { body }),
@@ -177,7 +184,7 @@ describe.skipIf(!available)('extension in Chromium', () => {
     const options = await optionsPage();
     await options.evaluate(
       (settings) => chrome.storage.local.set({ settings }),
-      testSettings({ titleFilters: ['Sport', 'Mittagessen', 'Abwesend'] }),
+      settings({ titleFilters: ['Sport', 'Mittagessen', 'Abwesend'] }),
     );
 
     const outlookTab = await context.newPage();
@@ -263,6 +270,26 @@ describe.skipIf(!available)('extension in Chromium', () => {
       .waitFor({ timeout: 10_000 });
     await options.locator('#save-message:has-text("Synced")').waitFor({ timeout: 10_000 });
     expect(dav.requests.some((r) => r.method === 'PROPFIND')).toBe(true);
+  });
+
+  test('a calendar for excluded events set in the page receives the filtered events', async () => {
+    outlook.events = sampleWeek();
+    const options = await optionsPage();
+    await options.locator('#excludedCaldavUrl').fill(EXCLUDED_COLLECTION);
+    await options
+      .locator('#excluded-where:has-text("mirrored into the calendar for excluded events")')
+      .waitFor({ timeout: 5_000 });
+    await options.getByRole('button', { name: 'Save', exact: true }).click();
+    await options
+      .locator('#save-message:has-text("for excluded events")')
+      .waitFor({ timeout: 10_000 });
+    await waitFor('both calendars', () => dav.objects.size === 4 && excludedDav.objects.size === 3);
+    expect(excludedDav.writes.every((w) => w.url.startsWith(EXCLUDED_COLLECTION))).toBe(true);
+    await options
+      .locator('#status:has-text("Calendar for excluded events")')
+      .waitFor({ timeout: 10_000 });
+    const screenshot = process.env.E2E_SCREENSHOT;
+    if (screenshot) await options.screenshot({ path: screenshot, fullPage: true });
   });
 
   test('the extension id is the one the manifest key fixes', async () => {

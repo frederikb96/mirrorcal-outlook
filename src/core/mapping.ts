@@ -61,17 +61,22 @@ export function classificationOf(sensitivity: Sensitivity): Classification | und
   return sensitivity === 'Confidential' ? 'CONFIDENTIAL' : 'PRIVATE';
 }
 
-export function isExcluded(
+/**
+ * Why an event stays out of the main calendar: `filtered` by a title filter or its availability
+ * (it may go to the calendar for excluded events), or `private` by the private events policy (it
+ * goes nowhere).
+ */
+export function exclusionOf(
   event: SourceEvent,
   settings: Settings,
   filters: TitleMatcher[],
-): boolean {
-  if (settings.excludeShowAs.includes(event.showAs)) return true;
+): 'filtered' | 'private' | undefined {
   if (classificationOf(event.sensitivity) && settings.policies.privateEvents.mode === 'skip') {
-    return true;
+    return 'private';
   }
+  if (settings.excludeShowAs.includes(event.showAs)) return 'filtered';
   const title = event.subject.trim();
-  return filters.some((matches) => matches(title));
+  return filters.some((matches) => matches(title)) ? 'filtered' : undefined;
 }
 
 function cleanText(value: string | undefined): string | undefined {
@@ -138,38 +143,49 @@ export async function mirrorUid(ownerId: string, sourceId: string): Promise<stri
 
 export interface DesiredSet {
   desired: DesiredObject[];
-  /** Events dropped by the title filters or availability exclusions. */
+  /** What should exist in the calendar for excluded events; empty when there is none. */
+  excluded: DesiredObject[];
+  /** Events kept out of the main calendar by the filters, availability exclusions or privacy. */
   filtered: number;
   /** Instances sharing an id with an earlier one; only the first is mirrored. */
   duplicates: number;
 }
 
-/** Filters, applies policies and renders every source event to the ICS that should exist. */
+/**
+ * Filters, applies policies and renders every source event to the ICS that should exist: in the
+ * main calendar, or, for filtered events and when `excludedUrl` is given, in the second one.
+ */
 export async function buildDesired(
   events: SourceEvent[],
   settings: Settings,
   collectionUrl: string,
   now: Date,
+  excludedUrl?: string,
 ): Promise<DesiredSet> {
   const filters = compileTitleFilters(settings.titleFilters);
-  const byUid = new Map<string, DesiredObject>();
+  const main = new Map<string, DesiredObject>();
+  const excluded = new Map<string, DesiredObject>();
   let filtered = 0;
   let duplicates = 0;
   for (const event of events) {
-    if (isExcluded(event, settings, filters)) {
-      filtered += 1;
-      continue;
-    }
+    const exclusion = exclusionOf(event, settings, filters);
+    if (exclusion) filtered += 1;
+    const into = !exclusion
+      ? { byUid: main, collection: collectionUrl }
+      : exclusion === 'filtered' && excludedUrl !== undefined
+        ? { byUid: excluded, collection: excludedUrl }
+        : undefined;
+    if (!into) continue;
     const uid = await mirrorUid(settings.ownerId, event.id);
-    if (byUid.has(uid)) {
+    if (main.has(uid) || excluded.has(uid)) {
       duplicates += 1;
       continue;
     }
     const mirror = mapEvent(event, settings);
     const { ics, hash } = await buildEventIcs(mirror, { uid, owner: settings.ownerId, now });
-    byUid.set(uid, {
+    into.byUid.set(uid, {
       uid,
-      href: new URL(`${encodeURIComponent(uid)}.ics`, collectionUrl).toString(),
+      href: new URL(`${encodeURIComponent(uid)}.ics`, into.collection).toString(),
       ics,
       hash,
       summary: mirror.summary,
@@ -177,6 +193,7 @@ export async function buildDesired(
       allDay: mirror.allDay,
     });
   }
-  const desired = [...byUid.values()].sort((a, b) => a.uid.localeCompare(b.uid));
-  return { desired, filtered, duplicates };
+  const sorted = (set: Map<string, DesiredObject>) =>
+    [...set.values()].sort((a, b) => a.uid.localeCompare(b.uid));
+  return { desired: sorted(main), excluded: sorted(excluded), filtered, duplicates };
 }
