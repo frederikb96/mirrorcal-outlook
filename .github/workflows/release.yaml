@@ -4,16 +4,25 @@ on:
   push:
     tags: ["v*"]
 
+# A release is not idempotent: cancelling one midway leaves a partial release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
   release:
     runs-on: arc-runner-mirrorcal-outlook
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
+      - name: Version guard
+        run: bun run scripts/release-notes.ts check "${GITHUB_REF_NAME}"
+      - name: Release notes
+        run: bun run scripts/release-notes.ts notes "${GITHUB_REF_NAME}" > release-notes.md
       - name: Build
         run: bun run build
       - name: Typecheck
@@ -24,8 +33,8 @@ jobs:
         run: bun run test
       - name: Package
         run: bun run package
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: mirrorcal-outlook.zip
-          generate_release_notes: true
+          body_path: release-notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}

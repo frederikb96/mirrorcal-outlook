@@ -13,7 +13,8 @@
     "build": "bun run scripts/build.ts",
     "build:engine": "bun run scripts/build-engine.ts",
     "package": "bun run build && bun run scripts/package.ts",
-    "test:e2e": "bun test ./tests/e2e/extension.e2e.ts"
+    "test:e2e": "bun test ./tests/e2e/extension.e2e.ts",
+    "screenshots": "bun run scripts/screenshots/capture.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",

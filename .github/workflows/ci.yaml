@@ -14,9 +14,9 @@ permissions:
 jobs:
   validate:
     runs-on: arc-runner-mirrorcal-outlook
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
       - name: Build
         id: build
@@ -31,5 +31,13 @@ jobs:
         run: bun run lint
       - name: Test
         run: bun run test
+      - name: Release metadata
+        run: bun run scripts/release-notes.ts check
       - name: Package
         run: bun run package
+      - name: Install Chromium
+        run: |
+          sudo apt-get install -y --no-install-recommends openssl
+          bunx playwright-core install --with-deps chromium
+      - name: Browser test
+        run: bun run test:e2e

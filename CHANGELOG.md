@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `bun run screenshots` regenerates the options page pictures used in the README.
+- The browser test runs in the pull-request checks, and so does a check that `package.json` and the changelog agree on the version.
+
+### Changed
+
+- The README is a front page with links into `docs/` (how it works, settings, safety, development).
+- Release notes are the version's changelog section instead of a generated list of pull requests; the release workflow refuses a tag that does not match `package.json` or has no changelog section.
+- Workflow actions are pinned to commit SHAs.
+
 ## [0.2.0] - 2026-11-09
 
 ### Added

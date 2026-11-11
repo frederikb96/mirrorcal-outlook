@@ -15,8 +15,8 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Bun version pinned in workflows",
-      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "description": "Bun version pinned in workflows and the setup action",
+      "managerFilePatterns": ["/^\\.github/(workflows|actions)/.+\\.ya?ml$/"],
       "matchStrings": ["#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+?)\\s+depName=(?<depName>.+?)\\s*\\n\\s*bun-version:\\s*['\"]?(?<currentValue>[^'\"\\s]+)"],
       "datasourceTemplate": "{{{datasource}}}"
     }
