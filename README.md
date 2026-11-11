@@ -14,8 +14,8 @@ A browser extension that mirrors your Outlook web calendar, one way, into a CalD
 </tr>
 </table>
 
-[![CI](https://github.com/frederikb96/mirrorcal-outlook/actions/workflows/ci.yaml/badge.svg)](https://github.com/frederikb96/mirrorcal-outlook/actions/workflows/ci.yaml)
-[![Release](https://img.shields.io/github/v/release/frederikb96/mirrorcal-outlook)](https://github.com/frederikb96/mirrorcal-outlook/releases)
+[![CI](https://github.com/frederikberg/mirrorcal-outlook/actions/workflows/ci.yaml/badge.svg)](https://github.com/frederikberg/mirrorcal-outlook/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/v/release/frederikberg/mirrorcal-outlook)](https://github.com/frederikberg/mirrorcal-outlook/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Your work meetings show up in the calendar app you already use, such as a Nextcloud calendar on your phone, without setting up an Outlook account on any device. The extension runs in the browser where you are signed in to Outlook on the web, reads the calendar from there and keeps a CalDAV calendar in step with it. Events you filter out can go into a second calendar instead of being dropped.
@@ -52,7 +52,7 @@ Everything runs inside the browser; there is no server of ours in between. The O
 
 The extension is not in a store. Load it as an unpacked extension.
 
-- Download `mirrorcal-outlook.zip` from the [latest release](https://github.com/frederikb96/mirrorcal-outlook/releases/latest) and unzip it into a folder you keep. To build it instead: `bun install && bun run build`, the result is `dist/`.
+- Download `mirrorcal-outlook.zip` from the [latest release](https://github.com/frederikberg/mirrorcal-outlook/releases/latest) and unzip it into a folder you keep. To build it instead: `bun install && bun run build`, the result is `dist/`.
 - Open `chrome://extensions` (Edge: `edge://extensions`) and switch on developer mode.
 - Choose **Load unpacked** and select the folder that contains `manifest.json`.
 - Open Outlook on the web and sign in. The extension can only sync while it has seen a valid token from that page.
