@@ -9,7 +9,7 @@
 </td>
 <td>
 <h1>MirrorCal Outlook</h1>
-Mirror your Outlook web calendar, one way, into a CalDAV calendar.
+A browser extension that mirrors your Outlook web calendar, one way, into a CalDAV calendar.
 </td>
 </tr>
 </table>
