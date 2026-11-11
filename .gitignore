@@ -5,3 +5,4 @@ dist-engine/
 mirrorcal-outlook.zip
 *.log
 .DS_Store
+release-notes.md

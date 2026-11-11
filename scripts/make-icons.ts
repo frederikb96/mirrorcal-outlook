@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Regenerates icons/icon-{16,48,128}.png: a calendar page on a rounded blue square. */
+/** Regenerates icons/icon-{16,48,128}.png and docs/images/logo.png: a calendar page on a rounded blue square. */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -91,3 +91,8 @@ function png(size: number): Uint8Array {
 const dir = join(resolve(import.meta.dir, '..'), 'icons');
 mkdirSync(dir, { recursive: true });
 for (const size of [16, 48, 128]) writeFileSync(join(dir, `icon-${size}.png`), png(size));
+
+// The README logo is the same drawing at a larger size.
+const logoDir = join(resolve(import.meta.dir, '..'), 'docs', 'images');
+mkdirSync(logoDir, { recursive: true });
+writeFileSync(join(logoDir, 'logo.png'), png(512));

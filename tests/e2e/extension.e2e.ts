@@ -7,24 +7,23 @@
  * --load-extension (Playwright's bundled one); set CHROMIUM_PATH to override its location.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { type BrowserContext, chromium, type Page, type Worker } from 'playwright-core';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { Page } from 'playwright-core';
 import type { StatusResponse } from '../../src/extension/messages.ts';
+import {
+  browserAvailable,
+  DAV_HOST,
+  type Harness,
+  OUTLOOK_HOST,
+  root,
+  startHarness,
+  waitFor,
+} from '../helpers/browser-harness.ts';
 import { extensionIdFromKey } from '../helpers/extension-id.ts';
 import { FakeCalDav, routeCalendars } from '../helpers/fake-caldav.ts';
 import { FakeOutlook } from '../helpers/fake-outlook.ts';
 import {
-  COLLECTION,
   EXCLUDED_COLLECTION,
   makeJwt,
   outlookId,
@@ -32,11 +31,6 @@ import {
   sampleWeek,
   testSettings,
 } from '../helpers/fixtures.ts';
-
-const root = resolve(import.meta.dir, '..', '..');
-const executable = process.env.CHROMIUM_PATH ?? chromium.executablePath();
-const OUTLOOK_HOST = 'outlook.cloud.microsoft';
-const DAV_HOST = new URL(COLLECTION).hostname;
 
 // A token that stays valid however long the suite runs; the fake server expects exactly this one.
 const TOKEN = makeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
@@ -49,137 +43,29 @@ const davFetch = routeCalendars(dav, excludedDav);
 // The browser runs on the real clock and the fixture week is fixed: the window reaches back to it.
 const settings = (overrides: Parameters<typeof testSettings>[0] = {}) =>
   testSettings({ daysBack: 730, ...overrides });
-const pageRequests: string[] = [];
 
-let tmp: string;
-let server: ReturnType<typeof Bun.serve>;
-let context: BrowserContext;
-let worker: Worker;
+let harness: Harness;
+let context: Harness['context'];
 let extensionId: string;
+let pageRequests: string[];
 
-const PAGE = `<!doctype html><title>Outlook</title><script>
-  fetch('/api/beta/me/calendars', { headers: { Authorization: 'Bearer ${TOKEN}' } });
-</script>`;
-
-function selfSignedCert(dir: string) {
-  const key = join(dir, 'key.pem');
-  const cert = join(dir, 'cert.pem');
-  const run = Bun.spawnSync([
-    'openssl',
-    'req',
-    '-x509',
-    '-newkey',
-    'rsa:2048',
-    '-nodes',
-    '-keyout',
-    key,
-    '-out',
-    cert,
-    '-days',
-    '1',
-    '-subj',
-    '/CN=mirrorcal-e2e',
-    '-addext',
-    `subjectAltName=DNS:${OUTLOOK_HOST},DNS:${DAV_HOST}`,
-  ]);
-  if (run.exitCode !== 0) throw new Error(`openssl failed: ${run.stderr.toString()}`);
-  return { key: readFileSync(key, 'utf8'), cert: readFileSync(cert, 'utf8') };
-}
-
-async function waitFor<T>(
-  what: string,
-  probe: () => Promise<T | undefined | false> | T | undefined | false,
-  ms = 20_000,
-): Promise<T> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    const value = await probe();
-    if (value) return value;
-    await Bun.sleep(150);
-  }
-  throw new Error(`Timed out waiting for ${what}`);
-}
-
-async function optionsPage(): Promise<Page> {
-  const page = await context.newPage();
-  await page.goto(`chrome-extension://${extensionId}/options.html`);
-  return page;
-}
+const optionsPage = () => harness.optionsPage();
 
 async function message<T>(page: Page, request: unknown): Promise<T> {
   return page.evaluate((r) => chrome.runtime.sendMessage(r), request) as Promise<T>;
 }
 
-const available = existsSync(executable);
-
 beforeAll(async () => {
-  if (!available) return;
-  tmp = mkdtempSync(join(tmpdir(), 'mirrorcal-e2e-'));
-  const build = Bun.spawnSync(['bun', 'run', 'scripts/build.ts'], { cwd: root });
-  if (build.exitCode !== 0) throw new Error(`build failed: ${build.stderr.toString()}`);
-
-  // The test copy may reach the fake CalDAV host without the runtime permission prompt.
-  const extDir = join(tmp, 'extension');
-  cpSync(join(root, 'dist'), extDir, { recursive: true });
-  const manifestPath = join(extDir, 'manifest.json');
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  manifest.host_permissions.push(`https://${DAV_HOST}/*`);
-  writeFileSync(manifestPath, JSON.stringify(manifest));
-
-  const tls = selfSignedCert(tmp);
-  server = Bun.serve({
-    port: 0,
-    tls,
-    async fetch(req) {
-      const host = (req.headers.get('host') ?? '').split(':')[0];
-      const url = new URL(req.url);
-      const external = `https://${host}${url.pathname}${url.search}`;
-      const headers = Object.fromEntries(req.headers);
-      if (host === OUTLOOK_HOST) {
-        if (url.pathname === '/owa/')
-          return new Response(PAGE, { headers: { 'Content-Type': 'text/html' } });
-        if (url.pathname.startsWith('/api/beta/')) return new Response('{}');
-        return outlook.fetch(external, { method: req.method, headers });
-      }
-      if (host === DAV_HOST) {
-        const withBody = ['PUT', 'REPORT', 'PROPFIND'].includes(req.method);
-        const body = withBody ? await req.text() : undefined;
-        return davFetch(external, {
-          method: req.method,
-          headers,
-          ...(body === undefined ? {} : { body }),
-        });
-      }
-      return new Response('unknown host', { status: 404 });
-    },
-  });
-
-  const userData = join(tmp, 'profile');
-  mkdirSync(userData);
-  context = await chromium.launchPersistentContext(userData, {
-    executablePath: executable,
-    headless: true,
-    ignoreHTTPSErrors: true,
-    args: [
-      `--disable-extensions-except=${extDir}`,
-      `--load-extension=${extDir}`,
-      `--host-resolver-rules=MAP ${OUTLOOK_HOST} 127.0.0.1:${server.port}, MAP ${DAV_HOST} 127.0.0.1:${server.port}, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1`,
-      '--ignore-certificate-errors',
-      '--no-sandbox',
-    ],
-  });
-  context.on('request', (r) => pageRequests.push(r.url()));
-  worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
-  extensionId = new URL(worker.url()).host;
+  if (!browserAvailable) return;
+  harness = await startHarness({ token: TOKEN, outlook, davFetch });
+  ({ context, extensionId, pageRequests } = harness);
 }, 60_000);
 
 afterAll(async () => {
-  await context?.close();
-  server?.stop(true);
-  if (tmp?.includes('mirrorcal-e2e-')) rmSync(tmp, { recursive: true, force: true });
+  await harness?.close();
 });
 
-describe.skipIf(!available)('extension in Chromium', () => {
+describe.skipIf(!browserAvailable)('extension in Chromium', () => {
   test('observes the page token, then mirrors on its own and shows it in the settings page', async () => {
     const options = await optionsPage();
     await options.evaluate(
